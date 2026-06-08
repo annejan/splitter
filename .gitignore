@@ -1,0 +1,28 @@
+# Build artifacts
+*.prg
+*.sym
+*.d64
+*.bin
+*.efo
+*.pef
+
+# Screenshots / scratch / captures
+*.png
+*.mp4
+
+# KickAssembler: ship just the jar (freeware, v5.25). Everything else
+# under kickass/ (PDF, examples, cfg) stays ignored.
+kickass/*
+!kickass/KickAss.jar
+
+# Spindle (extracted/built locally per checkout, once we go multi-part)
+spindle-*/
+spindle-*.zip
+
+# Agent / skill tooling (local, not project source)
+.agents/
+.claude/skills/
+skills-lock.json
+
+# Python cache
+__pycache__/
