@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.5  "full-screen $d016 zig-zag shear + poetry + SID"
+// splitter — v0.10  "Rubberband Swim: traveling per-scanline sine on hero rows"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -51,8 +51,22 @@
 .const TOP      = $42              // shear band spans the poetry (rows 2-18). Most
 .const BOT      = $c4              //   lines are static (drawn once, 0 work/frame);
 .const WORKLINE = $c8              //   only 3 hero lines animate -> budget wide open.
-.const D016BASE = $0c              // 40-col + xscroll 4 (shear centre)
+.const D016BASE = $0c              // 38-col + xscroll 4 (shear centre)
 .const MODE_TIME = 220             // frames per shear mode (0 zigzag/1 wave/2 row)
+// --- Rubberband Swim (hero rows): a sine that travels through the 8
+//     pixel-rows of each glyph and crawls upward every frame (woosh).
+.const VSTEP    = $18              // phase step BETWEEN scanlines (vertical wavelength)
+.const ROWOFF   = $20              // phase offset between hero rows (they swim out of phase)
+.const SWIMSPD  = 2                // master phase advance / frame = travel speed
+.const DEBUG    = 1                // 1 = colour-band raster profiler in the border
+
+// dbg(c): paint $d020 = c, but ONLY when DEBUG — zero cost in the pretty build
+.macro dbg(c) {
+    .if (DEBUG != 0) {
+        lda #c
+        sta $d020
+    }
+}
 
 start:
         sei
@@ -151,21 +165,16 @@ irq_work:
         // Text is STATIC (drawn once) -> no per-frame render. Only the 3
         // hero rows animate (shear + rainbow), so build+color run every
         // frame and stay tiny. Coloured debug bands graph the cost.
-        lda #$02                   // RED = SID player
-        sta $d020
+        dbg($02)                   // RED = SID player
         jsr music.play
-        lda #$07                   // YELLOW = phase + rotation
-        sta $d020
+        dbg($07)                   // YELLOW = phase + rotation
         jsr update_phase
         inc frame
-        lda #$04                   // PURPLE = shear table (3 hero rows)
-        sta $d020
+        dbg($04)                   // PURPLE = shear table (3 hero rows)
         jsr build_shear
-        lda #$05                   // GREEN = rainbow (3 hero rows)
-        sta $d020
+        dbg($05)                   // GREEN = rainbow (3 hero rows)
         jsr color_cycle
-        lda #$00                   // BLACK = idle slack to the band
-        sta $d020
+        dbg($00)                   // BLACK = idle
 
         lda #<irq_shear
         sta $fffe
@@ -221,72 +230,58 @@ irq_shear:
 // from a sine table; smaller during HOLD so the wall reads cleaner.
 //==================================================================
 build_shear:
-        lda phase
-        cmp #PH_HOLD
-        bne !breathe+
-        lda #$00                   // readable MEET -> no shear (clean)
-        beq !setamp+
-!breathe:
-        ldx frame
-        lda sine_amp,x             // slow breath 0..3 while lines move
-!setamp:
-        sta amp
-        lda #D016BASE
-        clc
-        adc amp
-        sta ev
-        lda #D016BASE
-        sec
-        sbc amp
-        sta od
-
-        // per-LINE role: SPLIT rows weave (zig-zag), clean rows stay flat
-        ldx #NLINES-1
-!bl:    ldy line_scan,x
+        // Rubberband Swim: hero rows show a sine that travels through the
+        // 8 pixel-rows of each glyph (per-scanline phase = +VSTEP) and the
+        // whole wave crawls upward every frame (master phase += SWIMSPD).
+        // Clean rows stay dead flat (0 wobble, readable).
+        lda #NLINES-1
+        sta linecnt
+!bl:    ldx linecnt
+        ldy line_scan,x            // Y = shear_tab base raster line for this row
         lda role,x
-        beq !clean+
-        lda ev                     // SPLIT: 8 scanlines, even ev / odd od
+        bne !swim+
+        lda #D016BASE              // clean: 8 flat scanlines
         sta shear_tab,y
         iny
-        lda od
         sta shear_tab,y
         iny
-        lda ev
         sta shear_tab,y
         iny
-        lda od
         sta shear_tab,y
         iny
-        lda ev
         sta shear_tab,y
         iny
-        lda od
         sta shear_tab,y
         iny
-        lda ev
         sta shear_tab,y
         iny
-        lda od
         sta shear_tab,y
         jmp !nx+
-!clean: lda #D016BASE              // SCROLL/clean: 8 flat scanlines
-        sta shear_tab,y
-        iny
-        sta shear_tab,y
-        iny
-        sta shear_tab,y
-        iny
-        sta shear_tab,y
-        iny
-        sta shear_tab,y
-        iny
-        sta shear_tab,y
-        iny
-        sta shear_tab,y
-        iny
-        sta shear_tab,y
-!nx:    dex
-        bpl !bl-
+!swim:  // base phase for scanline 0 = swimphase + row*ROWOFF
+        txa
+        .for (var b = 0; b < 5; b++) { asl }   // row * $20 (ROWOFF)
+        clc
+        adc swimphase
+        tax                        // X = phase, walks +VSTEP per scanline
+        .for (var s = 0; s < 8; s++) {
+            lda sin7,x
+            sta shear_tab,y
+            .if (s < 7) {
+                iny
+                txa
+                clc
+                adc #VSTEP
+                tax
+            }
+        }
+!nx:    dec linecnt
+        bmi !done+
+        jmp !bl-
+!done:
+        lda swimphase              // wave crawls upward (woosh) each frame
+        clc
+        adc #SWIMSPD
+        sta swimphase
         rts
 
 
@@ -421,6 +416,7 @@ mode:         .byte 0
 mode_timer:   .byte 1
 wave_scroll:  .byte 0
 linecnt:      .byte 0
+swimphase:    .byte 0
 sp:           .fill NLINES, 0
 
 line_start:   .fill NLINES, startList.get(i)
@@ -443,6 +439,10 @@ dst_lo: .fill NLINES, <(SCREEN + rowList.get(i)*40)
 dst_hi: .fill NLINES, >(SCREEN + rowList.get(i)*40)
 col_lo: .fill NLINES, <(COLOR + rowList.get(i)*40)
 col_hi: .fill NLINES, >(COLOR + rowList.get(i)*40)
+
+// Rubberband Swim sine: $d016 values $08..$0f (38-col bit always set,
+// xscroll 0..7) so the column mode never flickers — only the shear swings.
+sin7: .fill 256, $08 | round(3.5 + 3.5 * sin(toRadians(i * 360 / 256)))
 
 // shear amplitude breath: 0..3, a few cycles over 256 frames
 sine_amp: .fill 256, round(1.5 + 1.5 * sin(toRadians(i * 360 / 256)))
