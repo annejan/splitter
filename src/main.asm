@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.30  "banner = smooth 1px ROL/ROR streaming, 50Hz all the way"
+// splitter — v0.31  "diagonal rainbow, slow + consistent (round-robin, every frame)"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -266,20 +266,19 @@ irq_work:
         jsr build_shear
         dbg($0e)                   // LT-BLUE = split state machine
         jsr split_update
-        // The two heavy jobs (render_banner / colour / bar-table) are kept on
-        // SEPARATE frames so none stack into an overrun:
-        //   render frame  -> nothing else heavy
-        //   light frame   -> rainbow, and every 2nd one the bar table + drift
-        lda b_did_render
-        bne !light_done+           // banner rebuilt the canvas -> skip all extras
+        // Rainbow runs EVERY frame now — it's round-robin (half the swim rows
+        // per frame, ~3k cy) so it fits even alongside the banner streaming,
+        // giving a consistent diagonal drift instead of fast-then-frozen.
         dbg($05)                   // GREEN = rainbow drift
         jsr color_cycle
         .if (BARS != 0) {
-            lda frame              // bar table + drift only every 2nd light frame
+            lda b_did_render
+            bne !light_done+
+            lda frame
             and #$01
             bne !light_done+
             inc barscroll
-            dbg($06)               // BLUE = rasterbar table rebuild
+            dbg($06)
             jsr build_d021tab
         }
 !light_done:
@@ -459,34 +458,46 @@ build_d021tab:
 // on the odd frame next to build_shear so it stays inside 50 Hz.
 //==================================================================
 color_cycle:
-        // All swim rows share the same per-column rainbow, so compute the
-        // 40-cell row ONCE, then just copy it into each swim row's colour RAM.
-        // (7 rows recomputed was ~8k cy = over budget -> 25Hz; this is ~5k.)
-        ldx #0
-!mk:    txa
-        lsr                        // col>>1: one hue per 2 chars (de-confetti)
-        clc
-        adc frame
-        and #$07                   // text-safe 8-hue palette (all high-luma)
-        tay
-        lda rbsafe,y
-        sta colrow,x
-        inx
-        cpx #40
-        bne !mk-
-        // copy the row into every swim row's colour RAM
+        // DIAGONAL rainbow: each swim row's hue ramp is offset by its row
+        // index (row*3) so the colours flow diagonally across the wall (funky),
+        // drifting SLOWLY (frame>>2). ROUND-ROBIN: only half the swim rows are
+        // recoloured per frame ((row+frame)&1) so it's cheap enough to run
+        // EVERY frame — also during the banner scroll — for a CONSISTENT
+        // rainbow instead of fast-when-idle / frozen-when-scrolling.
         lda #NLINES-1
         sta linecnt
 !cl:    ldx linecnt
         lda role,x
         cmp #R_SWIM
         bne !skip+
+        lda linecnt
+        clc
+        adc frame
+        and #$01
+        bne !skip+
         lda col_lo,x
         sta cptr
         lda col_hi,x
         sta cptr+1
+        lda frame                  // hue base = (frame>>2) + row*3
+        lsr
+        lsr
+        sta tmp
+        lda linecnt
+        asl
+        clc
+        adc linecnt
+        clc
+        adc tmp
+        sta tmp
         ldy #39
-!cc:    lda colrow,y
+!cc:    tya
+        lsr                        // col>>1 (one hue / 2 chars)
+        clc
+        adc tmp
+        and #$07
+        tax
+        lda rbsafe,x
         sta (cptr),y
         dey
         bpl !cc-
