@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.36  "static poem lines scroll oldskool in/out; more story+greets text"
+// splitter — v0.37  "static lines now 1px-SMOOTH in/out (per-row sub-pixel $d016)"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -452,7 +452,8 @@ build_shear:
         lda role,x                 // swim re-enabled now the bars are off: the swim
         bne !swim+                 //   speckle only showed against the bars; on the
                                    //   black bg it's clean (write-order + badline fix).
-        lda #D016BASE              // clean: 8 flat scanlines
+        lda sxval,x                // static row: its live sub-pixel xscroll (= the
+                                   //   smooth in/out slide); D016BASE when at HOLD
         sta shear_tab,y
         iny
         sta shear_tab,y
@@ -609,88 +610,136 @@ recolor_all:
         rts
 
 
-// update_phase — the STATIC (non-swim) poem rows scroll oldskool in/out via
-// their 120-char buffer window (sp). IN: slide from off-screen (line_start)
-// to CENTER; HOLD: sit readable; OUT: slide on to line_exit. The swim rows
-// are left at CENTER (they wave in place) — only role==0 rows are touched.
-// We only re-render on a slide step (every SLIDE_STEP frames) -> cheap.
+// update_phase — STATIC poem rows scroll oldskool in/out, SMOOTH (1px) and
+// budget-safe. Each static row has its OWN sub-pixel phase fine = (gfine +
+// soff[x]) & 7, written as a live $d016 xscroll (sxval[x]) onto every scanline
+// of the row by build_shear -> 1px/frame hardware scroll. A row char-steps
+// (slides its 120-char buffer window sp by 1 + re-render) only when ITS fine
+// wraps to 0. The per-row stagger (distinct soff) spreads those wraps so at
+// most ONE row re-renders per frame (~440cy) instead of all six at once (the
+// 2.6k spike that blew the budget). slide_char 0->40 = IN (enters to CENTRE),
+// HOLD, 40->80 = OUT (exits far side), re-park. Swim rows untouched; the shear
+// LOOP is unchanged. soff/soff2row below are hand-tuned to the fixed role map.
 update_phase:
-        dec phase_timer
-        beq !trans+
-        jmp slide_phase            // mid-phase: animate the slide
-!trans:
+        lda phase
+        cmp #PH_HOLD
+        bne !slide+
+        // HOLD: settle any rows left 1 char short (spread render over 6 frames)
+        lda hold_settle
+        beq !hc+
+        dec hold_settle
+        jsr render_hold_row
+!hc:    dec phase_timer
+        bne !ret+
+        lda #PH_OUT
+        sta phase
+!ret:   rts
+!slide:
+        lda b_did_render           // heavy banner-home frame -> freeze 1 frame
+        bne !ret2+                 //   (sub-pixel pauses, invisible) -> no overrun
+        inc gfine
+        lda gfine
+        and #7
+        sta gfine
+        jsr slide_step
+        jsr update_sxval
+!ret2:  rts
+
+// slide_step — char-step + render the ONE static row whose fine just hit 0
+// (soff == (8-gfine)&7). When the reference row (soff 0, gfine==0) steps, bump
+// slide_char and check for IN->HOLD (centre) / OUT->re-park (exited far side).
+slide_step:
+        lda #8
+        sec
+        sbc gfine
+        and #7
+        cmp #6
+        bcs !none+                 // soff 6/7 -> no row wraps this frame
+        tay
+        ldx soff2row,y             // X = row index to char-step + render
+        clc
+        lda sp,x
+        adc sdir,x                 // sdir = +1 (text left) or $ff/-1 (text right)
+        sta sp,x
+        lda src_lo,x
+        clc
+        adc sp,x
+        sta srcptr
+        lda src_hi,x
+        adc #0
+        sta srcptr+1
+        lda dst_lo,x
+        sta dstptr
+        lda dst_hi,x
+        sta dstptr+1
+        ldy #39
+!cp:    lda (srcptr),y
+        sta (dstptr),y
+        dey
+        bpl !cp-
+        lda gfine                  // only the reference row (gfine==0) drives progress
+        bne !none+
+        inc slide_char
         lda phase
         cmp #PH_IN
-        beq !indone+
-        cmp #PH_HOLD
-        beq !holddone+
-        // OUT done -> back to IN: park static rows off-screen at their side
-        lda #PH_IN
-        sta phase
-        lda #T_IN
-        sta phase_timer
-        ldx #NLINES-1
-!rst:   lda role,x
-        bne !sk1+
-        lda line_start,x
-        sta sp,x
-!sk1:   dex
-        bpl !rst-
-        rts                        // no full render: incremental slide already
-                                   //   settled them (both line_exit & line_start
-                                   //   are off-screen pad -> identical blank)
-!indone:                           // IN done -> HOLD: snap statics readable
+        bne !out+
+        lda slide_char
+        cmp #CENTER
+        bcc !none+
+        jmp enter_hold
+!out:   lda slide_char
+        cmp #80
+        bcc !none+
+        jmp repark
+!none:  rts
+
+enter_hold:                        // IN done -> lock readable, align, settle
         lda #PH_HOLD
         sta phase
         lda #T_HOLD
         sta phase_timer
+        lda #6
+        sta hold_settle
+        lda #0
+        sta hold_idx
+        sta gfine
         ldx #NLINES-1
-!snap:  lda role,x
-        bne !sk2+
+!eh:    lda role,x
+        bne !ehn+
         lda #CENTER
         sta sp,x
-!sk2:   dex
-        bpl !snap-
-        rts                        // no full render: sp reached CENTER ~10 frames
-                                   //   before HOLD (T_IN 170 > 40*SLIDE_STEP 160)
-                                   //   so the incremental render already settled
-!holddone:                         // HOLD done -> OUT
-        lda #PH_OUT
-        sta phase
-        lda #T_OUT
-        sta phase_timer
+        lda #D016BASE
+        sta sxval,x
+!ehn:   dex
+        bpl !eh-
         rts
 
-// slide_phase — mid-phase. HOLD = nothing; IN/OUT nudge sp once per
-// SLIDE_STEP frames (cheap), and re-render only TWO static rows per frame
-// (round-robin) so the cost stays ~880cy/frame instead of a 2.6k spike that
-// blew the budget on step frames. 2 rows/frame -> all ~6 refresh in 3 frames
-// (< SLIDE_STEP) so no row lags behind the slide.
-slide_phase:
-        lda phase
-        cmp #PH_HOLD
-        beq !done+
-        lda frame
-        and #(SLIDE_STEP-1)
-        bne !nostep+
-        jsr slide_statics
-!nostep:
-        lda b_did_render           // a banner homed this frame (heavy) -> yield:
-        bne !done+                 //   skip the static render, do it next frame
-        jsr render_next_static
-!done:  rts
+repark:                            // OUT done -> park off-screen, slide IN again
+        lda #PH_IN
+        sta phase
+        lda #0
+        sta slide_char
+        sta gfine
+        ldx #NLINES-1
+!rp:    lda role,x
+        bne !rpn+
+        lda line_start,x
+        sta sp,x
+!rpn:   dex
+        bpl !rp-
+        rts
 
-// render_next_static — render the NEXT static row (window blit), advancing
-// stat_idx round-robin over role==0 rows only (swim rows keep their shear).
-render_next_static:
-        ldx stat_idx
+// render_hold_row — at HOLD entry rows may sit 1 char short of CENTRE (stagger);
+// render one static row per frame at CENTRE to settle them without a spike.
+render_hold_row:
+        ldx hold_idx
 !adv:   inx
         cpx #NLINES
         bcc !w+
         ldx #0
 !w:     lda role,x
-        bne !adv-                  // skip swim rows -> find next static
-        stx stat_idx
+        bne !adv-
+        stx hold_idx
         lda src_lo,x
         clc
         adc sp,x
@@ -709,26 +758,28 @@ render_next_static:
         bpl !cp-
         rts
 
-// slide_statics — nudge each static row's sp one char toward its target
-// (CENTER while sliding IN, line_exit while sliding OUT).
-slide_statics:
+// update_sxval — each static row's live $d016 xscroll from its own fine =
+// (gfine+soff)&7. $08 keeps 38-col so the scroll-wrap hides in the border.
+update_sxval:
         ldx #NLINES-1
-!ss:    lda role,x
-        bne !sn+                   // swim rows stay put
-        lda phase
-        cmp #PH_IN
-        bne !sout+
-        lda #CENTER
-        jmp !scmp+
-!sout:  lda line_exit,x
-!scmp:  cmp sp,x
-        beq !sn+
-        bcs !sinc+                 // target > sp -> sp++
-        dec sp,x
-        jmp !sn+
-!sinc:  inc sp,x
-!sn:    dex
-        bpl !ss-
+!u:     lda role,x
+        bne !un+
+        lda gfine
+        clc
+        adc soff,x
+        and #7
+        sta tmp                    // this row's fine
+        lda sdir,x
+        bmi !neg+
+        lda #7                     // text left  -> xscroll = 7 - fine
+        sec
+        sbc tmp
+        jmp !wr+
+!neg:   lda tmp                    // text right -> xscroll = fine
+!wr:    ora #$08
+        sta sxval,x
+!un:    dex
+        bpl !u-
         rts
 
 
@@ -1219,7 +1270,17 @@ glyph_ptr:
 //==================================================================
 phase:        .byte 0
 phase_timer:  .byte 0
-stat_idx:     .byte 0           // round-robin cursor over the static rows
+gfine:        .byte 0           // global sub-pixel counter 0..7 (the smooth scroll)
+slide_char:   .byte 0           // char progress 0..80 (0/80 off-screen, 40 centre)
+hold_settle:  .byte 0           // frames left to spread-render rows at HOLD entry
+hold_idx:     .byte 0           // round-robin cursor for the HOLD settle render
+sxval:        .fill NLINES, D016BASE   // per static row: live $d016 (smooth slide)
+sdir:         .fill NLINES, (startList.get(i) < CENTER) ? 1 : 255  // slide dir/row
+// per-row sub-pixel stagger so at most one row char-steps per frame. Tuned to
+// the fixed role map (static rows = idx 1,2,4,5,8,9 -> soff 0..5); soff2row is
+// the inverse. If role[] changes, regenerate both.
+soff:         .byte 0, 0, 1, 0, 2, 3, 0, 0, 4, 5
+soff2row:     .byte 1, 2, 4, 5, 8, 9
 frame:        .byte 0
 beatctr:      .byte 1                  // counts down to the next beat
 beathue:      .byte 0                  // rainbow hue surge accumulated on beats
