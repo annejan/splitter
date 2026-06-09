@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.21  "the real speckle: dark rainbow hues vanishing into bars -> bright palette"
+// splitter — v0.22  "bars off (the speckle source) -> clean black bg; swim back on"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -99,6 +99,8 @@
 .const BPAUSE     = 120            // frames to hold the readable line at the meet (~2.4s)
 .const osrc       = $f9            // zp pair (= cptr) reused as odd-row source ptr
 .const DEBUG    = 1                // 1 = colour-band raster profiler in the border
+.const BARS     = 0                // 1 = flowing $d021 rasterbars (needs a stable raster
+                                   //     to be speckle-free; off for now -> clean bg)
 .const INTRO    = 0                // 1 = run DEFEEST screenfill bloom (WIP: hangs $c07d)
 
 // dbg(c): paint $d020 = c, but ONLY when DEBUG — zero cost in the pretty build
@@ -266,12 +268,14 @@ irq_work:
         bne !light_done+           // banner rebuilt the canvas -> skip all extras
         dbg($05)                   // GREEN = rainbow drift
         jsr color_cycle
-        lda frame                  // bar table + drift only every 2nd light frame
-        and #$01
-        bne !light_done+
-        inc barscroll
-        dbg($06)                   // BLUE = rasterbar table rebuild
-        jsr build_d021tab
+        .if (BARS != 0) {
+            lda frame              // bar table + drift only every 2nd light frame
+            and #$01
+            bne !light_done+
+            inc barscroll
+            dbg($06)               // BLUE = rasterbar table rebuild
+            jsr build_d021tab
+        }
 !light_done:
         dbg($00)                   // BLACK = idle
 
@@ -312,8 +316,10 @@ irq_shear:
         bne !sl-
         lda shear_tab,y
         sta $d016
-        lda d021tab,y
-        sta $d021
+        .if (BARS != 0) {
+            lda d021tab,y
+            sta $d021
+        }
         iny
         cpy #BOT
         bne !sl-
@@ -356,8 +362,9 @@ build_shear:
         // colour drift (color_cycle still targets R_SWIM rows). The !swim
         // code below is kept (dead) for an easy revert once a stable raster
         // lands. To re-enable: uncomment the two lines below.
-        // lda role,x
-        // bne !swim+
+        lda role,x                 // swim re-enabled now the bars are off: the swim
+        bne !swim+                 //   speckle only showed against the bars; on the
+                                   //   black bg it's clean (write-order + badline fix).
         lda #D016BASE              // clean: 8 flat scanlines
         sta shear_tab,y
         iny
