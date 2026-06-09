@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.31  "diagonal rainbow, slow + consistent (round-robin, every frame)"
+// splitter — v0.32  "TWO venetian split-banners, alternating stream, 50Hz"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -25,9 +25,11 @@
 .var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
 .var speedList = List().add(2, 3, 1, 2, 3, 1, 2, 3, 2, 1)
 
-// Banner line — EXACTLY 40 chars so the meet snaps to a clean readable row.
+// Banner lines — EXACTLY 40 chars each so the meet snaps to a clean row.
 .var bmsg   = "    SPLITTER  -  FRISSER  DAN  OOIT     "
 .const MSGLEN = bmsg.size()   // = 40
+.var bmsg2  = "   DEFEEST GROET DE SCENE BIJ EVOKE !   "
+.const MSGLEN2 = bmsg2.size() // = 40
 
 * = $0801
         .byte $0c, $08, $0a, $00, $9e, $32, $30, $36, $34, $00, $00, $00
@@ -95,6 +97,10 @@
 .const C1CODE     = 64             // banner 1 uses canvas char codes 64..103
 .const CANVAS1    = FONT_RAM + C1CODE*8   // $3200 — the 40-char scratch canvas
 .const BANNER1ROW = 16             // a free row (not in rowList) for the banner
+.const C2CODE     = 104            // banner 2 uses canvas char codes 104..143
+.const CANVAS2    = FONT_RAM + C2CODE*8   // $3340 — banner 2's scratch canvas
+.const BANNER2ROW = 1              // top row (above the poem, outside the band)
+.const BPAUSE2    = 300            // banner 2 holds its meet longer (different tempo)
 .const SMAX       = 40             // FULL line width: the halves slide the whole 40 cols
                                    //   (fully off + back) so the sweep covers the entire
                                    //   line — not a fixed shorter reach that left part of
@@ -260,8 +266,17 @@ irq_work:
         jsr update_phase
         inc frame
         dbg($0a)                   // LT-RED = venetian banner (sets b_did_render)
-        jsr banner_scroll          //   run FIRST so the heavy-frame flag is known
-        jsr banner_color
+        // Stream only ONE banner per frame (alternating) so we never pay both
+        // ~2.4k ROL/ROR passes in one frame -> 50Hz holds. Each banner then
+        // scrolls 1px every 2 frames (still smooth, half speed).
+        lda frame
+        and #$01
+        bne !b2+
+        jsr banner_scroll          // even frame: banner 1
+        jmp !bcol+
+!b2:    jsr banner_scroll2         // odd frame: banner 2
+!bcol:  jsr banner_color           // colours are cheap -> both every frame
+        jsr banner_color2
         dbg($04)                   // PURPLE = shear table (swim rows)
         jsr build_shear
         dbg($0e)                   // LT-BLUE = split state machine
@@ -470,10 +485,10 @@ color_cycle:
         lda role,x
         cmp #R_SWIM
         bne !skip+
-        lda linecnt
-        clc
+        lda linecnt                // round-robin ~1/4 swim rows per frame (cheaper,
+        clc                        //   to leave room for the 2nd banner streaming)
         adc frame
-        and #$01
+        and #$03
         bne !skip+
         lda col_lo,x
         sta cptr
@@ -771,48 +786,81 @@ init_banner:
         pla
         sta $01                    // I/O back in
 
-        // banner row cells -> canvas char codes C1CODE..C1CODE+39
+        // both banner rows: screen cells -> their canvas char codes
         ldx #0
 !bc:    txa
         clc
         adc #C1CODE
         sta SCREEN + BANNER1ROW*40, x
-        lda #$0e                   // light-blue for now (rainbow drift later)
+        txa
+        clc
+        adc #C2CODE
+        sta SCREEN + BANNER2ROW*40, x
+        lda #$0e
         sta COLOR + BANNER1ROW*40, x
+        sta COLOR + BANNER2ROW*40, x
         inx
         cpx #40
         bne !bc-
 
-        // pre-render the clean line into bsrc; start at the meet, holding
-        jsr build_bsrc
-        lda #0
-        sta bs_sub                 // HOLD (readable)
-        sta bcol                   // feed starts at column 0
+        jsr build_bsrc             // pre-render both clean lines into bsrc/bsrc2
+        jsr build_bsrc2
+
+        lda #0                     // both start at the meet, holding
+        sta bs_sub
+        sta bcol
         sta bsmooth
+        sta bs_sub2
+        sta bcol2
+        sta bsmooth2
         lda #BPAUSE
         sta bs_tmr
-        jsr load_pending           // seed the incoming column
-        jsr blit_bsrc              // draw the clean readable line into the canvas
+        lda #BPAUSE2
+        sta bs_tmr2
+        ldy #7                     // seed pending from column 0 of each
+!sp:    lda bsrc,y
+        sta pending_even,y
+        sta pending_odd,y
+        lda bsrc2,y
+        sta pending_even2,y
+        sta pending_odd2,y
+        dey
+        bpl !sp-
+        ldx #0                     // blit both canvases = clean readable lines
+!c1:    lda bsrc,x
+        sta CANVAS1,x
+        lda bsrc2,x
+        sta CANVAS2,x
+        inx
+        bne !c1-
+        ldx #0
+!c2:    lda bsrc+$100,x
+        sta CANVAS1+$100,x
+        lda bsrc2+$100,x
+        sta CANVAS2+$100,x
+        inx
+        cpx #64
+        bne !c2-
         rts
 
 //==================================================================
-// build_bsrc — render the 40-char banner line into bsrc, in CANVAS byte
-// order (bsrc[c*8 + r] = font glyph row r of char c). Done once at init.
+// Banner engine — both banners share these two macros.
 //==================================================================
-build_bsrc:
-        lda #<bsrc
+// BUILD_BSRC — render a 40-char line MSGB into BSRCB (CANVAS byte order).
+.macro BUILD_BSRC(BSRCB, MSGB) {
+        lda #<BSRCB
         sta cptr
-        lda #>bsrc
+        lda #>BSRCB
         sta cptr+1
-        ldx #0                     // X = char column 0..39
-!bc:    lda msg,x
-        jsr glyph_ptr              // $02/$03 = FONT_RAM + char*8
+        ldx #0
+!bc:    lda MSGB,x
+        jsr glyph_ptr
         ldy #7
 !br:    lda ($02),y
-        sta (cptr),y               // bsrc[c*8 + r]
+        sta (cptr),y
         dey
         bpl !br-
-        lda cptr                   // cptr += 8
+        lda cptr
         clc
         adc #8
         sta cptr
@@ -821,115 +869,106 @@ build_bsrc:
 !nc:    inx
         cpx #40
         bne !bc-
-        rts
+}
 
-//==================================================================
-// banner_scroll — SMOOTH 1px venetian split-scroll via per-pixel-row ROL/ROR
-// (the real kloten technique). Each frame: even rows shift LEFT 1px (ROL,
-// fed a bit from pending_even), odd rows shift RIGHT 1px (ROR, fed
-// pending_odd). Every 8 frames a full char-column has entered -> advance
-// bcol and reload pending from bsrc. After a whole MSGLEN cycle the row is
-// back to bsrc (readable) -> snap+HOLD. ~2.4k cy/frame, EVERY frame, so the
-// motion is a buttery 50Hz (no even/odd split, no overrun).
-//==================================================================
-banner_scroll:
-        lda #0
-        sta b_did_render           // default: let irq_work run colour this frame
-        lda bs_sub
-        bne !move+
-        dec bs_tmr                 // HOLD the readable meet
-        beq !holddone+
-        rts
-!holddone:
-        lda #1                     // -> MOVE
-        sta bs_sub
-        rts
-!move:  lda #1                     // streaming this frame -> irq_work skips colour
-        sta b_did_render           //   (the swim rainbow freezes ~0.8s, imperceptible)
-        ldx #0                     // X = pixel row 0..7
+// BANNER_FRAME — one frame of 1px ROL/ROR venetian streaming for a banner
+// (even rows ROL left, odd rows ROR right). At a column boundary advance and
+// reload pending from BSRCB; after a full MLEN cycle snap clean + HOLD PAUSE.
+.macro BANNER_FRAME(CANVAS, MLEN, BSRCB, PAUSE, sub, tmr, col, smth, pe, po) {
+        lda sub
+        bne !mv+
+        dec tmr                    // HOLD the readable meet
+        beq !hd+
+        jmp !end+
+!hd:    lda #1
+        sta sub
+        jmp !end+
+!mv:    ldx #0
 !row:   txa
         and #$01
-        beq !even+
-        jmp !odd+
-!even:  asl pending_even,x         // even row: ROL left, new bit enters cell 39
-        .for (var c = 39; c >= 0; c--) {
-            rol CANVAS1 + c*8, x
-        }
+        beq !ev+
+        jmp !od+
+!ev:    asl pe,x
+        .for (var c = 39; c >= 0; c--) { rol CANVAS + c*8, x }
         jmp !nx+
-!odd:   lsr pending_odd,x          // odd row: ROR right, new bit enters cell 0
-        .for (var c = 0; c <= 39; c++) {
-            ror CANVAS1 + c*8, x
-        }
+!od:    lsr po,x
+        .for (var c = 0; c <= 39; c++) { ror CANVAS + c*8, x }
 !nx:    inx
         cpx #8
         beq !adv+
         jmp !row-
-!adv:   inc bsmooth                // 8 bits = one full char-column scrolled in
-        lda bsmooth
+!adv:   inc smth
+        lda smth
         cmp #8
-        bne !done+
+        bne !end+
         lda #0
-        sta bsmooth
-        inc bcol
-        lda bcol
-        cmp #MSGLEN
-        bne !ld+
-        lda #0                     // wrapped a full cycle -> home (== bsrc)
-        sta bcol
-        jsr blit_bsrc              // snap exactly clean + hold the readable line
+        sta smth
+        inc col
+        lda col
+        cmp #MLEN
+        bne !ldp+
+        lda #0                     // home -> snap exactly clean + hold
+        sta col
+        ldx #0
+!bl:    lda BSRCB,x
+        sta CANVAS,x
+        inx
+        bne !bl-
+        ldx #0
+!bl2:   lda BSRCB+$100,x
+        sta CANVAS+$100,x
+        inx
+        cpx #(MLEN*8-256)
+        bne !bl2-
         lda #0
-        sta bs_sub
-        lda #BPAUSE
-        sta bs_tmr
-        rts
-!ld:    jsr load_pending           // feed the next column into pending_even/odd
-!done:  rts
-
-//==================================================================
-// blit_bsrc — copy the clean readable line (bsrc) straight into the canvas.
-//==================================================================
-blit_bsrc:
-        ldx #0
-!b1:    lda bsrc,x
-        sta CANVAS1,x
-        inx
-        bne !b1-
-        ldx #0
-!b2:    lda bsrc+$100,x
-        sta CANVAS1+$100,x
-        inx
-        cpx #(320-256)
-        bne !b2-
-        rts
-
-//==================================================================
-// load_pending — load bsrc column `bcol` (8 bytes) into pending_even/odd
-// (both get the same column; the opposite ROL/ROR makes the venetian).
-//==================================================================
-load_pending:
-        lda bcol
-        sta tmp
+        sta sub
+        lda #PAUSE
+        sta tmr
+        jmp !end+
+!ldp:   lda col                    // feed next column into pending
         asl
         asl
         asl
         clc
-        adc #<bsrc
+        adc #<BSRCB
         sta srcptr
-        lda tmp
+        lda col
         lsr
         lsr
         lsr
         lsr
         lsr
         clc
-        adc #>bsrc
+        adc #>BSRCB
         sta srcptr+1
         ldy #7
 !lp:    lda (srcptr),y
-        sta pending_even,y
-        sta pending_odd,y
+        sta pe,y
+        sta po,y
         dey
         bpl !lp-
+!end:
+}
+
+// The banner engine + remaining code/data live above the SID ($1000-$144e)
+// to keep the first code block under it — the 2nd banner pushed Main over.
+* = $2000 "Banner+"
+
+build_bsrc:
+        BUILD_BSRC(bsrc, msg)
+        rts
+build_bsrc2:
+        BUILD_BSRC(bsrc2, msg2)
+        rts
+
+//==================================================================
+// banner_scroll / banner_scroll2 — one 1px streaming frame each (macro).
+//==================================================================
+banner_scroll:
+        BANNER_FRAME(CANVAS1, MSGLEN, bsrc, BPAUSE, bs_sub, bs_tmr, bcol, bsmooth, pending_even, pending_odd)
+        rts
+banner_scroll2:
+        BANNER_FRAME(CANVAS2, MSGLEN2, bsrc2, BPAUSE2, bs_sub2, bs_tmr2, bcol2, bsmooth2, pending_even2, pending_odd2)
         rts
 
 // banner_color — drift a 16-hue rainbow across the banner row every frame
@@ -949,6 +988,24 @@ banner_color:
         tay                        // so every letter stays readable at the meet
         lda rbsafe,y
         sta COLOR + BANNER1ROW*40, x
+        inx
+        cpx #40
+        bne !bc-
+        rts
+
+// banner_color2 — same drift on banner 2's row, phase-offset for variety.
+banner_color2:
+        ldx #0
+!bc:    txa
+        lsr
+        clc
+        adc bhue
+        clc
+        adc #4
+        and #$07
+        tay
+        lda rbsafe,y
+        sta COLOR + BANNER2ROW*40, x
         inx
         cpx #40
         bne !bc-
@@ -1003,11 +1060,18 @@ bcol:         .byte 0                  // bsrc column currently feeding in (0..M
 bsmooth:      .byte 0                  // 0..7 bit counter within a char-column
 pending_even: .fill 8, 0               // incoming column bytes for the even (ROL) rows
 pending_odd:  .fill 8, 0               // incoming column bytes for the odd (ROR) rows
+bs_sub2:      .byte 0                  // banner 2 state (own canvas/message/tempo)
+bs_tmr2:      .byte 0
+bcol2:        .byte 0
+bsmooth2:     .byte 0
+pending_even2:.fill 8, 0
+pending_odd2: .fill 8, 0
 bhue:         .byte 0                  // rainbow drift phase for the banner row
 barscroll:    .byte 0                  // flowing-rasterbar scroll offset
 colrow:       .fill 40, 0              // one computed rainbow row, copied to all swim rows
 b_did_render: .byte 0                  // 1 = banner rebuilt the canvas this frame (unused now)
-msg:          .text bmsg               // the banner line (screencode_upper)
+msg:          .text bmsg               // banner 1 line (screencode_upper)
+msg2:         .text bmsg2              // banner 2 line
 
 line_start:   .fill NLINES, startList.get(i)
 line_exit:    .fill NLINES, 80 - startList.get(i)
@@ -1017,7 +1081,7 @@ line_color:   .fill NLINES, colList.get(i)
 // per-line role: 0 static, 1 swim, 2 split(center-column, retired). The real
 // split is the venetian banner (row 16); 3 swim lines (rows 3/8/13) keep the
 // poem wall alive, staggered with static lines between for readability.
-role:         .byte R_SWIM, R_SWIM, 0, R_SWIM, R_SWIM, 0, R_SWIM, R_SWIM, 0, 0
+role:         .byte R_SWIM, 0, 0, R_SWIM, 0, 0, R_SWIM, R_SWIM, 0, 0
 // first raster line of each poetry row (display top 51 + row*8)
 line_scan:    .fill NLINES, 50 + rowList.get(i)*8   // 50 (not 51): the shear value
                                    // written during a line affects THAT line, so place
@@ -1063,7 +1127,8 @@ barpal8: .byte $00, $06, $0b, $0c, $0b, $06, $00, $00
 d021tab: .fill 256, 0
 
 // the clean readable banner line, pre-rendered in CANVAS byte order
-bsrc: .fill 320, 0
+bsrc:  .fill 320, 0
+bsrc2: .fill 320, 0
 
 
 //==================================================================
