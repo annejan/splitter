@@ -1,22 +1,25 @@
 //==================================================================
-// splitter — v0.4  "scene-poetry choreographer + SID"
+// splitter — v0.5  "full-screen $d016 zig-zag shear + poetry + SID"
 //
-// A screen full of semi-poetic nonsense, each line moving DIFFERENTLY:
-// some slide in from the left, some from the right, at different speeds.
-// They converge to readable, hold a beat, drift back out, repeat. Music:
-// "Dingen" by Cinder/deFEEST.
+// The splits are back — and over the WHOLE screen, cheaply. A stable
+// per-scanline $d016 loop shears every visible line: even lines xscroll
+// +A, odd lines -A, with A breathing each frame -> a fine per-pixel-row
+// zig-zag across all 200 lines (no bitmap shifting). Underneath, the
+// char-mode scene-poetry slides in/out (per line different) and resolves
+// readable. Music "Dingen" by Cinder/deFEEST.
 //
-// Char mode: each line is a 120-char buffer (40 pad / 40 content / 40
-// pad); a per-line scan position sp (0..80) windows 40 chars onto its
-// row. sp=40 reads true. A global IN/HOLD/OUT machine drives sp toward
-// 40 (each line at its own speed, from its own side), holds, then out.
+// Structure (the demoscene shape): IRQ fires in the lower border; the
+// per-frame work (music, choreography, screen render, shear table) runs
+// in the off-screen time — bracketed by $d020 inc/dec as the budget
+// ruler — then the $d016 loop runs through the visible area. $d016
+// mid-line is VSP-safe; the cmp $d012 poll re-syncs each line so badlines
+// /DMA don't drift it.
 //==================================================================
 .cpu _6502
 .encoding "screencode_upper"
 
 .var music = LoadSid("../music/kleuter-dinges.sid")
 
-// per-line choreography (assembly-time lists)
 .var rowList   = List().add(2, 4, 6, 8, 10, 12, 14, 16, 18, 20)
 .var colList   = List().add($0e, $03, $0d, $07, $01, $0f, $0a, $05, $0c, $06)
 .var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
@@ -45,6 +48,10 @@
 .const T_HOLD   = 120
 .const T_OUT    = 130
 
+.const TOP      = $32              // first visible raster line (shear loop)
+.const BOT      = $f8              // last+1 visible line
+.const D016BASE = $0c              // 40-col + xscroll 4 (shear centre)
+
 start:
         sei
         lda #$35
@@ -53,13 +60,12 @@ start:
         sta $d018
         lda #$1b
         sta $d011
-        lda #$08
+        lda #D016BASE
         sta $d016
         lda #$00
         sta $d020
         sta $d021
 
-        // clear screen
         ldx #0
         lda #$20
 !cl:    sta SCREEN+$000,x
@@ -69,7 +75,6 @@ start:
         inx
         bne !cl-
 
-        // per-line colour fill
         ldx #0
 !lc:    lda col_lo,x
         sta cptr
@@ -84,7 +89,6 @@ start:
         cpx #NLINES
         bne !lc-
 
-        // init line state
         ldx #NLINES-1
 !si:    lda line_start,x
         sta sp,x
@@ -95,11 +99,9 @@ start:
         lda #T_IN
         sta phase_timer
 
-        // init music (song 0)
         lda #music.startSong-1
         jsr music.init
 
-        // raster IRQ
         lda #<irq
         sta $fffe
         lda #>irq
@@ -111,7 +113,7 @@ start:
         lda $dd0d
         lda #$01
         sta $d01a
-        lda #$00
+        lda #$fb                   // fire in the lower border
         sta $d012
         lda $d011
         and #$7f
@@ -122,6 +124,9 @@ start:
 !loop:  jmp !loop-
 
 
+//==================================================================
+// raster IRQ — off-screen work, then the visible-area $d016 shear loop.
+//==================================================================
 irq:
         pha
         txa
@@ -131,12 +136,26 @@ irq:
         lda #$ff
         sta $d019
 
+        inc $d020                  // ## budget band: off-screen work ##
         jsr music.play
-
-        inc $d020                  // ## debug budget band ##
         jsr update_phase
         jsr render
+        jsr build_shear
         dec $d020
+
+        // --- per-scanline $d016 zig-zag shear over the visible area ---
+        ldy #TOP
+!w0:    cpy $d012
+        bne !w0-
+!sl:    lda shear_tab,y
+        sta $d016
+        iny
+!w1:    cpy $d012
+        bne !w1-
+        cpy #BOT
+        bne !sl-
+        lda #D016BASE
+        sta $d016                  // restore centre for the border
 
         pla
         tay
@@ -147,8 +166,41 @@ irq:
 
 
 //==================================================================
-// update_phase — IN/HOLD/OUT machine + per-line move toward target.
+// build_shear — shear_tab[line] = base +A (even) / -A (odd). A breathes
+// from a sine table; smaller during HOLD so the wall reads cleaner.
 //==================================================================
+build_shear:
+        inc frame
+        lda phase
+        cmp #PH_HOLD
+        bne !breathe+
+        lda #0                     // readable MEET -> no shear (clean)
+        beq !setamp+
+!breathe:
+        ldx frame
+        lda sine_amp,x             // slow breath 0..3 while lines move
+!setamp:
+        sta amp
+        lda #D016BASE
+        clc
+        adc amp
+        sta ev                     // even lines: base + A
+        lda #D016BASE
+        sec
+        sbc amp
+        sta od                     // odd lines:  base - A
+        ldx #TOP
+!fb:    lda ev
+        sta shear_tab,x
+        inx
+        lda od
+        sta shear_tab,x
+        inx
+        cpx #BOT
+        bcc !fb-
+        rts
+
+
 update_phase:
         dec phase_timer
         bne !move+
@@ -184,7 +236,6 @@ update_phase:
         dex
         bpl !rst-
         rts
-
 !move:
         ldx #NLINES-1
 !ml:    lda phase
@@ -199,13 +250,13 @@ update_phase:
         cmp tmp
         beq !mnext+
         bcc !up+
-        sec                         // sp > target -> down by speed
+        sec
         sbc line_speed,x
         cmp tmp
         bcs !sset+
         lda tmp
         jmp !sset+
-!up:    clc                         // sp < target -> up by speed
+!up:    clc
         adc line_speed,x
         cmp tmp
         bcc !sset+
@@ -216,9 +267,6 @@ update_phase:
         rts
 
 
-//==================================================================
-// render — window 40 chars of each line buffer onto its screen row.
-//==================================================================
 render:
         ldx #0
 !rl:    lda src_lo,x
@@ -248,6 +296,10 @@ render:
 //==================================================================
 phase:        .byte 0
 phase_timer:  .byte 0
+frame:        .byte 0
+amp:          .byte 0
+ev:           .byte 0
+od:           .byte 0
 tmp:          .byte 0
 sp:           .fill NLINES, 0
 
@@ -263,18 +315,20 @@ dst_hi: .fill NLINES, >(SCREEN + rowList.get(i)*40)
 col_lo: .fill NLINES, <(COLOR + rowList.get(i)*40)
 col_hi: .fill NLINES, >(COLOR + rowList.get(i)*40)
 
+// shear amplitude breath: 0..3, a few cycles over 256 frames
+sine_amp: .fill 256, round(1.5 + 1.5 * sin(toRadians(i * 360 / 256)))
+
+.align 256
+shear_tab: .fill 256, D016BASE
+
 
 //==================================================================
-// SID music — "Dingen" by Cinder/deFEEST (load $1000, init/play there)
+// SID — "Dingen" by Cinder/deFEEST
 //==================================================================
 * = music.location "Music"
         .fill music.size, music.getData(i)
 
 
-//==================================================================
-// line buffers — 40 pad / line / pad to 120. Window at sp=40 -> chars
-// 40..79 (the readable line).
-//==================================================================
 .macro poemline(s) {
         .fill 40, $20
         .text s
