@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.18  "rasterbars truly clean: precomputed bg table, early write, no speckle"
+// splitter — v0.19  "spread the banner rebuild over 2 frames -> no cycle overrun"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -251,23 +251,28 @@ irq_work:
         dbg($07)                   // YELLOW = phase machine
         jsr update_phase
         inc frame
-        lda frame                  // flowing rasterbar drifts (every 2 frames)
-        and #$01
-        bne !nobar+
-        inc barscroll
-!nobar:
+        dbg($0a)                   // LT-RED = venetian banner (sets b_did_render)
+        jsr banner_scroll          //   run FIRST so the heavy-frame flag is known
+        jsr banner_color
         dbg($04)                   // PURPLE = shear table (swim rows)
         jsr build_shear
         dbg($0e)                   // LT-BLUE = split state machine
         jsr split_update
-        dbg($0a)                   // LT-RED = venetian banner (sets b_did_render)
-        jsr banner_scroll
-        jsr banner_color
-        dbg($05)                   // GREEN = rainbow — SKIP on a banner-render
-        lda b_did_render           //   frame so render+rainbow never share a frame
-        bne !nocolor+
+        // The two heavy jobs (render_banner / colour / bar-table) are kept on
+        // SEPARATE frames so none stack into an overrun:
+        //   render frame  -> nothing else heavy
+        //   light frame   -> rainbow, and every 2nd one the bar table + drift
+        lda b_did_render
+        bne !light_done+           // banner rebuilt the canvas -> skip all extras
+        dbg($05)                   // GREEN = rainbow drift
         jsr color_cycle
-!nocolor:
+        lda frame                  // bar table + drift only every 2nd light frame
+        and #$01
+        bne !light_done+
+        inc barscroll
+        dbg($06)                   // BLUE = rasterbar table rebuild
+        jsr build_d021tab
+!light_done:
         dbg($00)                   // BLACK = idle
 
         lda #<irq_shear
@@ -384,10 +389,16 @@ build_shear:
         clc
         adc #SWIMSPD
         sta swimphase
+        rts
 
-        // precompute the rasterbar bg for the band: ONE colour per 8-line block
-        // (so edges land on the 8-line grid, off badlines), flowing via barscroll.
-        // irq_shear then just reads d021tab,y and writes it early -> crisp.
+//==================================================================
+// build_d021tab — precompute the rasterbar bg for the band: ONE colour per
+// 8-line block (edges on the 8-line grid, off badlines), flowing via
+// barscroll. irq_shear then just reads d021tab,y and writes it early. Only
+// called on LIGHT frames (not a banner-render frame), so it never stacks
+// with render_banner -> no overrun.
+//==================================================================
+build_d021tab:
         ldy #TOP
 !bf:    tya
         lsr
@@ -729,7 +740,8 @@ init_banner:
         sta bs_dir
         lda #BPAUSE
         sta bs_tmr
-        jsr render_banner          // draw the readable line into the canvas
+        jsr render_even            // draw the full readable line into the canvas
+        jsr render_odd
         rts
 
 //==================================================================
@@ -769,7 +781,10 @@ build_bsrc:
 //   canvas cell c: even rows <- bsrc[c-s] (valid c>=s), odd <- bsrc[c+s]
 //   (valid c+s<40), else space.
 //==================================================================
-render_banner:
+// render_even — rebuild only the EVEN pixel-rows (0,2,4,6) of the canvas,
+// shifted right by s (enter from the right). Half the work -> done one frame,
+// render_odd the next, so the heavy rebuild never lands in a single frame.
+render_even:
         lda #<CANVAS1
         sta dstptr
         lda #>CANVAS1
@@ -778,26 +793,9 @@ render_banner:
         sta srcptr
         lda #>bsrc
         sta srcptr+1
-        lda bs_s                   // osrc = bsrc + s*8
-        asl
-        asl
-        asl
-        clc
-        adc #<bsrc
-        sta osrc
-        lda bs_s
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        adc #>bsrc
-        sta osrc+1
-        ldx #0                     // X = canvas cell 0..39
-!cell:
-        // --- even rows (0,2,4,6): valid when c >= s ---
-        cpx bs_s
-        bcc !eblank+
+        ldx #0
+!cell:  cpx bs_s                   // even valid when c >= s
+        bcc !blank+
         ldy #0
         lda (srcptr),y
         sta (dstptr),y
@@ -810,15 +808,14 @@ render_banner:
         ldy #6
         lda (srcptr),y
         sta (dstptr),y
-        lda srcptr                 // advance esrc only while valid
+        lda srcptr
         clc
         adc #8
         sta srcptr
-        bcc !ev+
+        bcc !adv+
         inc srcptr+1
-!ev:    jmp !edone+
-!eblank:
-        lda #0
+        jmp !adv+
+!blank: lda #0
         ldy #0
         sta (dstptr),y
         ldy #2
@@ -827,44 +824,7 @@ render_banner:
         sta (dstptr),y
         ldy #6
         sta (dstptr),y
-!edone:
-        // --- odd rows (1,3,5,7): valid when c + s < 40 ---
-        txa
-        clc
-        adc bs_s
-        cmp #40
-        bcs !oblank+
-        ldy #1
-        lda (osrc),y
-        sta (dstptr),y
-        ldy #3
-        lda (osrc),y
-        sta (dstptr),y
-        ldy #5
-        lda (osrc),y
-        sta (dstptr),y
-        ldy #7
-        lda (osrc),y
-        sta (dstptr),y
-        lda osrc
-        clc
-        adc #8
-        sta osrc
-        bcc !ov+
-        inc osrc+1
-!ov:    jmp !odone+
-!oblank:
-        lda #0
-        ldy #1
-        sta (dstptr),y
-        ldy #3
-        sta (dstptr),y
-        ldy #5
-        sta (dstptr),y
-        ldy #7
-        sta (dstptr),y
-!odone:
-        lda dstptr                 // cdst += 8 (next cell)
+!adv:   lda dstptr
         clc
         adc #8
         sta dstptr
@@ -872,9 +832,77 @@ render_banner:
         inc dstptr+1
 !cc:    inx
         cpx #40
-        beq !rbdone+
+        beq !done+
         jmp !cell-
-!rbdone:
+!done:  rts
+
+// render_odd — the ODD pixel-rows (1,3,5,7), shifted left by s (enter from
+// the left). osrc = bsrc + s*8; valid when c + s < 40.
+render_odd:
+        lda #<CANVAS1
+        sta dstptr
+        lda #>CANVAS1
+        sta dstptr+1
+        lda bs_s
+        asl
+        asl
+        asl
+        clc
+        adc #<bsrc
+        sta srcptr
+        lda bs_s
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        adc #>bsrc
+        sta srcptr+1
+        ldx #0
+!cell:  txa
+        clc
+        adc bs_s
+        cmp #40
+        bcs !blank+
+        ldy #1
+        lda (srcptr),y
+        sta (dstptr),y
+        ldy #3
+        lda (srcptr),y
+        sta (dstptr),y
+        ldy #5
+        lda (srcptr),y
+        sta (dstptr),y
+        ldy #7
+        lda (srcptr),y
+        sta (dstptr),y
+        lda srcptr
+        clc
+        adc #8
+        sta srcptr
+        bcc !adv+
+        inc srcptr+1
+        jmp !adv+
+!blank: lda #0
+        ldy #1
+        sta (dstptr),y
+        ldy #3
+        sta (dstptr),y
+        ldy #5
+        sta (dstptr),y
+        ldy #7
+        sta (dstptr),y
+!adv:   lda dstptr
+        clc
+        adc #8
+        sta dstptr
+        bcc !cc+
+        inc dstptr+1
+!cc:    inx
+        cpx #40
+        beq !done+
+        jmp !cell-
+!done:  rts
         rts
 
 //==================================================================
@@ -885,6 +913,16 @@ render_banner:
 banner_scroll:
         lda #0
         sta b_did_render           // cleared unless we rebuild the canvas below
+        // an odd-row rebuild scheduled by last frame's step? do it now (light)
+        lda bs_render
+        beq !nopend+
+        lda #0
+        sta bs_render
+        lda #1
+        sta b_did_render
+        jsr render_odd
+        rts                        // one half per frame — done for this frame
+!nopend:
         lda bs_sub
         bne !move+
         // HOLD at the meet (s=0, readable)
@@ -919,9 +957,10 @@ banner_scroll:
         lda #BPAUSE
         sta bs_tmr
 !render:
-        lda #1                     // heavy frame — tell irq_work to skip color_cycle
+        lda #1                     // heavy-ish frame — skip colour/bars this frame
         sta b_did_render
-        jsr render_banner
+        sta bs_render              // and schedule the odd-row half for next frame
+        jsr render_even
 !done:  rts
 
 // banner_color — drift a 16-hue rainbow across the banner row every frame
@@ -996,6 +1035,7 @@ bs_tmr:       .byte 0                  // sub-phase timer
 bhue:         .byte 0                  // rainbow drift phase for the banner row
 barscroll:    .byte 0                  // flowing-rasterbar scroll offset
 b_did_render: .byte 0                  // 1 = banner rebuilt the canvas this frame
+bs_render:    .byte 0                  // 1 = odd-row rebuild pending next frame
 msg:          .text bmsg               // the banner line (screencode_upper)
 
 line_start:   .fill NLINES, startList.get(i)
