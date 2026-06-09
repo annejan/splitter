@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.35  "tunable tempo-beat: swim lurch + rainbow surge on the beat"
+// splitter — v0.36  "static poem lines scroll oldskool in/out; more story+greets text"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -36,12 +36,22 @@
 .eval lines1.add("  SCROLLING IN FROM LEFT AND RIGHT")
 .eval lines1.add("  AND MEETING CLEAN IN THE MIDDLE")
 .eval lines1.add("  ONE IDEA EXECUTED AT FIFTY HERTZ")
+.eval lines1.add("  NO BITMAP - JUST A CHAR-MODE TRICK")
+.eval lines1.add("  A RAM FONT CANVAS IS THE SCROLLER")
+.eval lines1.add("  TWO SPLITS - ONE FAST - ONE SLOW")
+.eval lines1.add("  RAINBOWS DRIFTING DIAGONALLY ...")
+.eval lines1.add("  PROUDLY MADE AT THE SNACKBAR")
 .var lines2 = List()
 .eval lines2.add("  GREETINGS TO EVERYONE AT EVOKE !")
 .eval lines2.add("  AND TO ALL C64 SCENERS OUT THERE")
 .eval lines2.add("  DESIRE  BOOZE  CENSOR  GENESIS")
 .eval lines2.add("  KLOOT WAS HERE - FRIET MET ALLES")
 .eval lines2.add("  SEE YOU AT THE SNACKBAR - CINDER")
+.eval lines2.add("  HELLO BREADBIN LOVERS WORLDWIDE")
+.eval lines2.add("  GREETS TO THE WHOLE DUTCH SCENE")
+.eval lines2.add("  CODERS GRAFICIANS AND MUSICIANS")
+.eval lines2.add("  KEEP THE C64 ALIVE IN 2026 !")
+.eval lines2.add("  RESPECT TO EVERYONE STILL HERE")
 .const NL1 = lines1.size()
 .const NL2 = lines2.size()
 
@@ -66,9 +76,11 @@
 .const PH_IN    = 0
 .const PH_HOLD  = 1
 .const PH_OUT   = 2
-.const T_IN     = 130
-.const T_HOLD   = 120
-.const T_OUT    = 130
+.const T_IN     = 170             // frames for the static lines to slide IN
+.const T_HOLD   = 250             // frames they sit readable
+.const T_OUT    = 170             // frames to slide OUT
+.const SLIDE_STEP = 4             // move sp 1 char every 4 frames (must be pow2);
+                                  //   render the static rows only on those frames
 
 .const TOP      = $42              // shear band over the poetry. Lowest SWIM row is now
 .const BOT      = $c4              //   row13 (raster ~161), well inside; row18 is static
@@ -207,11 +219,19 @@ start:
         bne !lc-
 
         ldx #NLINES-1
-!si:    lda #CENTER                // all lines static at their readable window
-        sta sp,x
+!si:    lda role,x                 // swim rows sit readable at CENTER; static
+        bne !sic+                  //   rows start PARKED off-screen (line_start)
+        lda line_start,x           //   so they slide IN at startup.
+        jmp !sis+
+!sic:   lda #CENTER
+!sis:   sta sp,x
         dex
         bpl !si-
-        jsr render                 // draw the whole poem ONCE (static)
+        lda #PH_IN                 // kick off the oldskool slide-in
+        sta phase
+        lda #T_IN
+        sta phase_timer
+        jsr render                 // draw the whole poem ONCE
         // split lines start apart (sep=20 -> blank); draw them so they don't
         // flash their full text for a frame before the state machine kicks in
         ldx #NLINES-1
@@ -295,9 +315,10 @@ irq_work:
         adc beathue
         sta beathue
 !nobeat:
-        dbg($07)                   // YELLOW = phase machine
-        jsr update_phase
         inc frame
+        lda #0                     // clear "a banner homed (heavy) this frame";
+        sta b_did_render           //   the home blit below sets it so the slide
+                                   //   render yields that one frame -> no overrun
         dbg($0a)                   // LT-RED = venetian banner (sets b_did_render)
         // Stream only ONE banner per frame (50Hz). WEIGHTED 2:1 so the TOP
         // banner (2) scrolls fast and the BOTTOM banner (1) scrolls slow:
@@ -314,8 +335,15 @@ irq_work:
         jsr banner_scroll2         // TOP (fast) — 2 of 3 frames
         jmp !bcol+
 !slow:  jsr banner_scroll          // BOTTOM (slow) — 1 of 3 frames
-!bcol:  jsr banner_color           // colours are cheap -> both every frame
-        jsr banner_color2
+!bcol:  jsr banner_color           // banner 1 colour every frame
+        lda phase                  // during the static-row slide we spend this
+        cmp #PH_HOLD               //   frame's headroom on render_next_static
+        bne !skipc2+               //   instead, so skip banner 2's recolour
+        jsr banner_color2          //   (its rainbow just stops drifting briefly)
+!skipc2:
+        dbg($07)                   // YELLOW = phase machine + static-row slide
+        jsr update_phase           //   (runs AFTER the banner so b_did_render is
+                                   //   known -> skips its render on a home frame)
         dbg($04)                   // PURPLE = shear table (swim rows)
         jsr build_shear
         dbg($0e)                   // LT-BLUE = split state machine
@@ -581,40 +609,128 @@ recolor_all:
         rts
 
 
+// update_phase — the STATIC (non-swim) poem rows scroll oldskool in/out via
+// their 120-char buffer window (sp). IN: slide from off-screen (line_start)
+// to CENTER; HOLD: sit readable; OUT: slide on to line_exit. The swim rows
+// are left at CENTER (they wave in place) — only role==0 rows are touched.
+// We only re-render on a slide step (every SLIDE_STEP frames) -> cheap.
 update_phase:
         dec phase_timer
-        bne !move+
+        beq !trans+
+        jmp slide_phase            // mid-phase: animate the slide
+!trans:
         lda phase
         cmp #PH_IN
-        bne !notin+
+        beq !indone+
+        cmp #PH_HOLD
+        beq !holddone+
+        // OUT done -> back to IN: park static rows off-screen at their side
+        lda #PH_IN
+        sta phase
+        lda #T_IN
+        sta phase_timer
+        ldx #NLINES-1
+!rst:   lda role,x
+        bne !sk1+
+        lda line_start,x
+        sta sp,x
+!sk1:   dex
+        bpl !rst-
+        rts                        // no full render: incremental slide already
+                                   //   settled them (both line_exit & line_start
+                                   //   are off-screen pad -> identical blank)
+!indone:                           // IN done -> HOLD: snap statics readable
         lda #PH_HOLD
         sta phase
         lda #T_HOLD
         sta phase_timer
         ldx #NLINES-1
-!snap:  lda #CENTER
+!snap:  lda role,x
+        bne !sk2+
+        lda #CENTER
         sta sp,x
-        dex
+!sk2:   dex
         bpl !snap-
-        rts
-!notin:
-        cmp #PH_HOLD
-        bne !nothold+
+        rts                        // no full render: sp reached CENTER ~10 frames
+                                   //   before HOLD (T_IN 170 > 40*SLIDE_STEP 160)
+                                   //   so the incremental render already settled
+!holddone:                         // HOLD done -> OUT
         lda #PH_OUT
         sta phase
         lda #T_OUT
         sta phase_timer
         rts
-!nothold:
-        lda #PH_IN
-        sta phase
-        lda #T_IN
-        sta phase_timer
-        // roles are FIXED while we dial in the split — no rotation (it would
-        // shuffle which lines split mid-flight and fight the state machine).
+
+// slide_phase — mid-phase. HOLD = nothing; IN/OUT nudge sp once per
+// SLIDE_STEP frames (cheap), and re-render only TWO static rows per frame
+// (round-robin) so the cost stays ~880cy/frame instead of a 2.6k spike that
+// blew the budget on step frames. 2 rows/frame -> all ~6 refresh in 3 frames
+// (< SLIDE_STEP) so no row lags behind the slide.
+slide_phase:
+        lda phase
+        cmp #PH_HOLD
+        beq !done+
+        lda frame
+        and #(SLIDE_STEP-1)
+        bne !nostep+
+        jsr slide_statics
+!nostep:
+        lda b_did_render           // a banner homed this frame (heavy) -> yield:
+        bne !done+                 //   skip the static render, do it next frame
+        jsr render_next_static
+!done:  rts
+
+// render_next_static — render the NEXT static row (window blit), advancing
+// stat_idx round-robin over role==0 rows only (swim rows keep their shear).
+render_next_static:
+        ldx stat_idx
+!adv:   inx
+        cpx #NLINES
+        bcc !w+
+        ldx #0
+!w:     lda role,x
+        bne !adv-                  // skip swim rows -> find next static
+        stx stat_idx
+        lda src_lo,x
+        clc
+        adc sp,x
+        sta srcptr
+        lda src_hi,x
+        adc #0
+        sta srcptr+1
+        lda dst_lo,x
+        sta dstptr
+        lda dst_hi,x
+        sta dstptr+1
+        ldy #39
+!cp:    lda (srcptr),y
+        sta (dstptr),y
+        dey
+        bpl !cp-
         rts
-!move:
-        rts                        // text is static — no per-frame slide
+
+// slide_statics — nudge each static row's sp one char toward its target
+// (CENTER while sliding IN, line_exit while sliding OUT).
+slide_statics:
+        ldx #NLINES-1
+!ss:    lda role,x
+        bne !sn+                   // swim rows stay put
+        lda phase
+        cmp #PH_IN
+        bne !sout+
+        lda #CENTER
+        jmp !scmp+
+!sout:  lda line_exit,x
+!scmp:  cmp sp,x
+        beq !sn+
+        bcs !sinc+                 // target > sp -> sp++
+        dec sp,x
+        jmp !sn+
+!sinc:  inc sp,x
+!sn:    dex
+        bpl !ss-
+        rts
+
 
 
 render:
@@ -948,7 +1064,9 @@ init_banner:
 !adv:   inc smth
         lda smth
         cmp #8
-        bne !end+
+        beq !home+
+        jmp !end+
+!home:
         lda #0
         sta smth
         inc col
@@ -957,6 +1075,8 @@ init_banner:
         bne !ldp+
         lda #0                     // home -> snap exactly clean + hold
         sta col
+        lda #1                     // mark this a HEAVY frame (big blit + rebuild)
+        sta b_did_render           //   so the static-row slide skips its render
         ldx #0
 !bl:    lda BSRCB,x
         sta CANVAS,x
@@ -1099,6 +1219,7 @@ glyph_ptr:
 //==================================================================
 phase:        .byte 0
 phase_timer:  .byte 0
+stat_idx:     .byte 0           // round-robin cursor over the static rows
 frame:        .byte 0
 beatctr:      .byte 1                  // counts down to the next beat
 beathue:      .byte 0                  // rainbow hue surge accumulated on beats
