@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.17  "badline-safe rasterbars: flowing colour, crisp edges, no speckle"
+// splitter — v0.18  "rasterbars truly clean: precomputed bg table, early write, no speckle"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -298,18 +298,10 @@ irq_shear:
         sta $d019
 
         ldy #TOP
-!sl:    lda shear_tab,y            // per-scanline $d016 shear (the swim)
-        sta $d016
-        tya                        // flowing rasterbar — but indexed by (y>>3),
-        lsr                        // so bar EDGES sit on fixed 8-line grid
-        lsr                        // (y==0 mod8) while BADLINES are at y==3 mod8:
-        lsr                        // edges never land on a badline, so a late
-        clc                        // badline write falls mid-bar (same colour) =
-        adc barscroll              // no speckle. Colours still flow via barscroll.
-        and #$07
-        tax
-        lda barpal8,x
-        sta $d021
+!sl:    lda d021tab,y              // rasterbar bg FIRST (cycle ~3, before the char
+        sta $d021                  //   fetch) -> no ragged edge. Precomputed per
+        lda shear_tab,y            //   8-line block in build_shear (edges off badlines).
+        sta $d016                  // then the per-scanline $d016 shear (the swim)
         iny
 !w:     cpy $d012
         bne !w-
@@ -392,6 +384,31 @@ build_shear:
         clc
         adc #SWIMSPD
         sta swimphase
+
+        // precompute the rasterbar bg for the band: ONE colour per 8-line block
+        // (so edges land on the 8-line grid, off badlines), flowing via barscroll.
+        // irq_shear then just reads d021tab,y and writes it early -> crisp.
+        ldy #TOP
+!bf:    tya
+        lsr
+        lsr
+        lsr
+        clc
+        adc barscroll
+        and #$07
+        tax
+        lda barpal8,x              // colour for this 8-line block
+        sta tmp                    // hold it (the boundary check below clobbers A)
+!bff:   lda tmp
+        sta d021tab,y
+        iny
+        cpy #BOT
+        beq !bfd+
+        tya
+        and #$07
+        bne !bff-                  // still inside the block -> same colour
+        jmp !bf-                   // block boundary -> recompute
+!bfd:
         rts
 
 
@@ -1030,6 +1047,9 @@ shear_tab: .fill 256, D016BASE
 // flowing rasterbar palette: 8 dark blue/grey colours (readable behind text),
 // rotated by barscroll. Bar EDGES sit on the 8-line grid (badline-safe).
 barpal8: .byte $00, $06, $0b, $0c, $0b, $06, $00, $00
+// per-rasterline bg colour, precomputed each frame by build_shear (one colour
+// per 8-line block) so irq_shear can write $d021 early with no compute.
+d021tab: .fill 256, 0
 
 // the clean readable banner line, pre-rendered in CANVAS byte order
 bsrc: .fill 320, 0
