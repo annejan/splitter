@@ -20,7 +20,7 @@
 
 .var music = LoadSid("../music/kleuter-dinges.sid")
 
-.var rowList   = List().add(7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+.var rowList   = List().add(2, 3, 4, 7, 8, 9, 12, 13, 14, 18)   // paragraphs w/ blank rows
 .var colList   = List().add($0e, $03, $0d, $07, $01, $0f, $0a, $05, $0c, $06)
 .var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
 .var speedList = List().add(2, 3, 1, 2, 3, 1, 2, 3, 2, 1)
@@ -48,9 +48,9 @@
 .const T_HOLD   = 120
 .const T_OUT    = 130
 
-.const TOP      = $6b              // shear band = the packed poetry block (rows
-.const BOT      = $bb              //   7-16). Tight band -> short shear loop ->
-.const WORKLINE = $c0              //   ~70 lines of budget back. irq_work below BOT.
+.const TOP      = $42              // shear band spans the poetry (rows 2-18). Most
+.const BOT      = $c4              //   lines are static (drawn once, 0 work/frame);
+.const WORKLINE = $c8              //   only 3 hero lines animate -> budget wide open.
 .const D016BASE = $0c              // 40-col + xscroll 4 (shear centre)
 .const MODE_TIME = 220             // frames per shear mode (0 zigzag/1 wave/2 row)
 
@@ -92,10 +92,11 @@ start:
         bne !lc-
 
         ldx #NLINES-1
-!si:    lda line_start,x
+!si:    lda #CENTER                // all lines static at their readable window
         sta sp,x
         dex
         bpl !si-
+        jsr render                 // draw the whole poem ONCE (static)
         lda #PH_IN
         sta phase
         lda #T_IN
@@ -144,28 +145,27 @@ irq_work:
         lda #$ff
         sta $d019
 
-        inc $d020                  // ## budget band ##
-        jsr music.play             // every frame -> SID never skips
-        jsr update_phase           // every frame -> phase timing stays true
+        // ---- coloured debug bands: each $d020 colour = a routine, so the
+        // ---- border graphs exactly where the raster time goes ----
+        //   RED music | YELLOW phase | BLUE render | PURPLE shear | GREEN rainbow
+        // Text is STATIC (drawn once) -> no per-frame render. Only the 3
+        // hero rows animate (shear + rainbow), so build+color run every
+        // frame and stay tiny. Coloured debug bands graph the cost.
+        lda #$02                   // RED = SID player
+        sta $d020
+        jsr music.play
+        lda #$07                   // YELLOW = phase + rotation
+        sta $d020
+        jsr update_phase
         inc frame
-        lda frame
-        lsr
-        bcs !oddframe+
-        // EVEN frame: the 400-char render (skip while held still)
-        lda phase
-        cmp #PH_HOLD
-        beq !workdone+
-        jsr render
-        jmp !workdone+
-!oddframe:
-        // ODD frame: shear table + the rainbow. Splitting render off the
-        // build/colour frame keeps either single frame inside the budget
-        // so the beam never laps us — animation steps at 25fps, music and
-        // the shear DISPLAY stay a solid 50Hz.
+        lda #$04                   // PURPLE = shear table (3 hero rows)
+        sta $d020
         jsr build_shear
+        lda #$05                   // GREEN = rainbow (3 hero rows)
+        sta $d020
         jsr color_cycle
-!workdone:
-        dec $d020
+        lda #$00                   // BLACK = idle slack to the band
+        sta $d020
 
         lda #<irq_shear
         sta $fffe
@@ -296,20 +296,46 @@ build_shear:
 // on the odd frame next to build_shear so it stays inside 50 Hz.
 //==================================================================
 color_cycle:
-        .for (var r=0; r<NLINES; r++) {
-            ldx #39
-        !cc:
-            txa
-            clc
-            adc frame
-            adc #(r*5)             // diagonal phase per row
-            and #$0f
-            tay
-            lda rainbow16,y
-            sta COLOR + rowList.get(r)*40, x
-            dex
-            bpl !cc-
-        }
+        lda #NLINES-1
+        sta linecnt
+!cl:    ldx linecnt
+        lda role,x                 // only HERO rows rainbow; static stay plain
+        beq !skip+
+        lda col_lo,x
+        sta cptr
+        lda col_hi,x
+        sta cptr+1
+        ldy #39
+!cc:    tya
+        clc
+        adc frame
+        and #$0f
+        tax
+        lda rainbow16,x
+        sta (cptr),y
+        dey
+        bpl !cc-
+!skip:  dec linecnt
+        bpl !cl-
+        rts
+
+// recolor_all — restore every line to its plain colour (called on a role
+// rotation so a line that just lost hero status drops its leftover rainbow)
+recolor_all:
+        lda #NLINES-1
+        sta linecnt
+!rl:    ldx linecnt
+        lda col_lo,x
+        sta cptr
+        lda col_hi,x
+        sta cptr+1
+        lda line_color,x
+        ldy #39
+!rc:    sta (cptr),y
+        dey
+        bpl !rc-
+        dec linecnt
+        bpl !rl-
         rts
 
 
@@ -351,41 +377,10 @@ update_phase:
         cpy #NLINES-1
         bne !rot-
         stx role + NLINES-1
-        ldx #NLINES-1
-!rst:   lda line_start,x
-        sta sp,x
-        dex
-        bpl !rst-
+        jsr recolor_all            // drop the old hero rainbows back to plain
         rts
 !move:
-        ldx #NLINES-1
-!ml:    lda phase
-        cmp #PH_OUT
-        bne !tgtc+
-        lda line_exit,x
-        jmp !havetgt+
-!tgtc:  lda #CENTER
-!havetgt:
-        sta tmp
-        lda sp,x
-        cmp tmp
-        beq !mnext+
-        bcc !up+
-        sec
-        sbc line_speed,x
-        cmp tmp
-        bcs !sset+
-        lda tmp
-        jmp !sset+
-!up:    clc
-        adc line_speed,x
-        cmp tmp
-        bcc !sset+
-        lda tmp
-!sset:  sta sp,x
-!mnext: dex
-        bpl !ml-
-        rts
+        rts                        // text is static — no per-frame slide
 
 
 render:
@@ -425,6 +420,7 @@ tmp:          .byte 0
 mode:         .byte 0
 mode_timer:   .byte 1
 wave_scroll:  .byte 0
+linecnt:      .byte 0
 sp:           .fill NLINES, 0
 
 line_start:   .fill NLINES, startList.get(i)
