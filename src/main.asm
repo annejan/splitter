@@ -145,14 +145,25 @@ irq_work:
         sta $d019
 
         inc $d020                  // ## budget band ##
-        jsr music.play
-        jsr update_phase
-        lda phase                  // skip the 400-char render while the
-        cmp #PH_HOLD               //   wall is held still (readable beat)
-        beq !norender+
+        jsr music.play             // every frame -> SID never skips
+        jsr update_phase           // every frame -> phase timing stays true
+        inc frame
+        lda frame
+        lsr
+        bcs !oddframe+
+        // EVEN frame: the 400-char render (skip while held still)
+        lda phase
+        cmp #PH_HOLD
+        beq !workdone+
         jsr render
-!norender:
+        jmp !workdone+
+!oddframe:
+        // ODD frame: rebuild the shear table. Splitting render/build
+        // across frames keeps either single frame inside the budget so
+        // the beam never laps us — animation steps at 25fps, but music
+        // and the shear DISPLAY stay a solid 50Hz.
         jsr build_shear
+!workdone:
         dec $d020
 
         lda #<irq_shear
@@ -209,7 +220,6 @@ irq_shear:
 // from a sine table; smaller during HOLD so the wall reads cleaner.
 //==================================================================
 build_shear:
-        inc frame
         lda phase
         cmp #PH_HOLD
         bne !breathe+
