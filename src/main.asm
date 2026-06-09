@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.19  "spread the banner rebuild over 2 frames -> no cycle overrun"
+// splitter — v0.20  "kill swim speckle: $d016-first write order + badline-safe swim fill"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -303,11 +303,11 @@ irq_shear:
         sta $d019
 
         ldy #TOP
-!sl:    lda d021tab,y              // rasterbar bg FIRST (cycle ~3, before the char
-        sta $d021                  //   fetch) -> no ragged edge. Precomputed per
-        lda shear_tab,y            //   8-line block in build_shear (edges off badlines).
-        sta $d016                  // then the per-scanline $d016 shear (the swim)
-        iny
+!sl:    lda shear_tab,y            // $d016 shear FIRST — it's the timing-critical one
+        sta $d016                  //   (must land before the ~cy16 char fetch or the
+        lda d021tab,y              //   swim row's left column glitches = the speckle).
+        sta $d021                  //   $d021 bg second (~cy15, still before the 38-col
+        iny                        //   display edge ~cy31) -> clean bars too.
 !w:     cpy $d012
         bne !w-
         cpy #BOT
@@ -370,15 +370,21 @@ build_shear:
         clc
         adc swimphase
         tax                        // X = phase, walks +VSTEP per scanline
+        // NOTE scanline 1 deliberately repeats scanline 0's xscroll: on a swim
+        // row that 2nd scanline is always a badline (line_scan&7==2 -> +1==3),
+        // where the $d016 write lands late; making it equal its neighbour means
+        // the late write changes nothing = no left-edge speckle.
         .for (var s = 0; s < 8; s++) {
             lda sin7,x
             sta shear_tab,y
             .if (s < 7) {
                 iny
-                txa
-                clc
-                adc #VSTEP
-                tax
+                .if (s != 0) {
+                    txa
+                    clc
+                    adc #VSTEP
+                    tax
+                }
             }
         }
 !nx:    dec linecnt
