@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.28  "row18 static (band-edge half-animate fix); 6 swim rows, 50Hz"
+// splitter — v0.29  "banner step every 2 frames (smoother), demo holds 50Hz"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -99,7 +99,9 @@
                                    //   (fully off + back) so the sweep covers the entire
                                    //   line — not a fixed shorter reach that left part of
                                    //   the row half-done. 40*2 ~ 1.6s each way.
-.const BSTEP2     = 2              // frames per 1-char shear step
+.const BSTEP2     = 1              // step every frame -> with the even/odd split that
+                                   //   lands a char-step every 2 frames (25Hz motion)
+                                   //   while each frame stays <=3.8k cy -> 50Hz held
 .const BPAUSE     = 220            // long readable hold (~4.4s) so the meet still dominates
 .const osrc       = $f9            // zp pair (= cptr) reused as odd-row source ptr
 .const DEBUG    = 1                // 1 = colour-band raster profiler in the border
@@ -972,8 +974,11 @@ render_odd:
 //==================================================================
 banner_scroll:
         lda #0
-        sta b_did_render           // cleared unless we rebuild the canvas below
-        // an odd-row rebuild scheduled by last frame's step? do it now (light)
+        sta b_did_render
+        // Render is SPLIT across two frames (even, then odd) to stay <=3.8k/
+        // frame -> the demo holds 50Hz. With BSTEP2=1 the step lands every 2
+        // frames (25Hz motion) — rendering BOTH halves in one frame is ~7.6k
+        // and overruns (the 27Hz the user saw). Pending odd from last step:
         lda bs_render
         beq !nopend+
         lda #0
@@ -981,15 +986,14 @@ banner_scroll:
         lda #1
         sta b_did_render
         jsr render_odd
-        rts                        // one half per frame — done for this frame
+        rts
 !nopend:
         lda bs_sub
         bne !move+
-        // HOLD at the meet (s=0, readable)
-        dec bs_tmr
+        dec bs_tmr                 // HOLD at the meet (readable)
         bne !done+
         lda #1
-        sta bs_sub                 // -> MOVE (continuous wrap-scroll)
+        sta bs_sub
         lda #BSTEP2
         sta bs_tmr
         rts
@@ -997,22 +1001,19 @@ banner_scroll:
         bne !done+
         lda #BSTEP2
         sta bs_tmr
-        // CONTINUOUS scroll: even rows scroll right, odd left, content WRAPS
-        // (nothing disappears — what leaves one edge re-enters the other).
-        // One full cycle (s 0->39) then home -> hold the readable meet.
-        inc bs_s
+        inc bs_s                   // continuous wrap-scroll, home -> hold
         lda bs_s
         cmp #40
         bcc !render+
-        lda #0                     // wrapped home -> readable -> hold
+        lda #0
         sta bs_s
         sta bs_sub
         lda #BPAUSE
         sta bs_tmr
 !render:
-        lda #1                     // heavy-ish frame — skip colour/bars this frame
+        lda #1
         sta b_did_render
-        sta bs_render              // and schedule the odd-row half for next frame
+        sta bs_render              // schedule the odd half for the next frame
         jsr render_even
 !done:  rts
 
