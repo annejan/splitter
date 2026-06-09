@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.14  "banner oscillates: diverge<->converge to the meet, connected flow"
+// splitter — v0.15  "demo-viby: flowing rasterbars + 3 swim lines + venetian banner"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -260,6 +260,7 @@ irq_work:
         dbg($0a)                   // LT-RED = venetian split-scroll banner
         jsr banner_scroll
         jsr banner_color           // rainbow drift (also during the meet pause)
+        inc barscroll              // flowing rasterbar wash drifts down
         dbg($00)                   // BLACK = idle
 
         lda #<irq_shear
@@ -282,14 +283,22 @@ irq_work:
 //==================================================================
 irq_shear:
         pha
+        txa
+        pha
         tya
         pha
         lda #$ff
         sta $d019
 
         ldy #TOP
-!sl:    lda shear_tab,y
+!sl:    lda shear_tab,y            // per-scanline $d016 shear (the swim)
         sta $d016
+        tya                        // + a flowing rasterbar behind the poem
+        clc
+        adc barscroll
+        tax
+        lda bargrad,x
+        sta $d021
         iny
 !w:     cpy $d012
         bne !w-
@@ -297,6 +306,8 @@ irq_shear:
         bne !sl-
         lda #D016BASE
         sta $d016
+        lda #$00
+        sta $d021                  // black background outside the band
 
         lda #<irq_work
         sta $fffe
@@ -307,6 +318,8 @@ irq_shear:
 
         pla
         tay
+        pla
+        tax
         pla
         rti
 
@@ -949,6 +962,7 @@ bs_sub:       .byte 0                  // 0 = HOLD at meet, 1 = MOVE
 bs_dir:       .byte 1                  // +1 diverge / $ff converge
 bs_tmr:       .byte 0                  // sub-phase timer
 bhue:         .byte 0                  // rainbow drift phase for the banner row
+barscroll:    .byte 0                  // flowing-rasterbar scroll offset
 msg:          .text bmsg               // the banner line (screencode_upper)
 
 line_start:   .fill NLINES, startList.get(i)
@@ -957,8 +971,9 @@ line_speed:   .fill NLINES, speedList.get(i)
 line_color:   .fill NLINES, colList.get(i)
 
 // per-line role: 0 static, 1 swim, 2 split(center-column, retired). The real
-// split is now the venetian banner (row 16); keep one swim line for variety.
-role:         .byte 0, 0, 0, 0, R_SWIM, 0, 0, 0, 0, 0
+// split is the venetian banner (row 16); 3 swim lines (rows 3/8/13) keep the
+// poem wall alive, staggered with static lines between for readability.
+role:         .byte 0, R_SWIM, 0, 0, R_SWIM, 0, 0, R_SWIM, 0, 0
 // first raster line of each poetry row (display top 51 + row*8)
 line_scan:    .fill NLINES, 50 + rowList.get(i)*8   // 50 (not 51): the shear value
                                    // written during a line affects THAT line, so place
@@ -995,6 +1010,11 @@ wave_sine: .fill 256, D016BASE + round(3 * sin(toRadians(i * 360 * 4 / 256)))
 
 .align 256
 shear_tab: .fill 256, D016BASE
+
+// flowing rasterbar gradient: 8-scanline bars (black/blue/dk-grey/med-grey),
+// dark enough to keep the poem readable. Indexed by (rasterline+barscroll).
+.var barpal = List().add($00, $06, $0b, $0c, $0b, $06, $00, $00)
+bargrad: .fill 256, barpal.get((i>>3) & 7)
 
 // the clean readable banner line, pre-rendered in CANVAS byte order
 bsrc: .fill 320, 0
