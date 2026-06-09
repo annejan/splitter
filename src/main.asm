@@ -1,94 +1,103 @@
 //==================================================================
-// splitter — v0.3  "zig-zag wall (multi-row)"
+// splitter — v0.4  "scene-poetry choreographer + SID"
 //
-// The per-pixel-row zig-zag from v0.2, now a WALL: NROWS char-rows
-// stacked, each a line of text, all shearing into the same zig-zag and
-// meeting together. Even pixel rows scroll LEFT (forward stream), odd
-// rows scroll RIGHT (backward stream); they cross in the middle and the
-// whole wall reads true for a beat.
+// A screen full of semi-poetic nonsense, each line moving DIFFERENTLY:
+// some slide in from the left, some from the right, at different speeds.
+// They converge to readable, hold a beat, drift back out, repeat. Music:
+// "Dingen" by Cinder/deFEEST.
 //
-// The shifter is fully unrolled (KA .for over row/pixel-row/cell) -> no
-// loop overhead, just a long ROL/ROR blob. $d020 inc/dec brackets it so
-// the border band shows exactly how much raster time the wall costs —
-// the classic way to find the per-frame budget ceiling. Push NROWS up
-// until the border band gets fat, then stop (or switch to a cheaper
-// full-screen technique: $d016 per-scanline shear).
+// Char mode: each line is a 120-char buffer (40 pad / 40 content / 40
+// pad); a per-line scan position sp (0..80) windows 40 chars onto its
+// row. sp=40 reads true. A global IN/HOLD/OUT machine drives sp toward
+// 40 (each line at its own speed, from its own side), holds, then out.
 //==================================================================
 .cpu _6502
 .encoding "screencode_upper"
+
+.var music = LoadSid("../music/kleuter-dinges.sid")
+
+// per-line choreography (assembly-time lists)
+.var rowList   = List().add(2, 4, 6, 8, 10, 12, 14, 16, 18, 20)
+.var colList   = List().add($0e, $03, $0d, $07, $01, $0f, $0a, $05, $0c, $06)
+.var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
+.var speedList = List().add(2, 3, 1, 2, 3, 1, 2, 3, 2, 1)
 
 * = $0801
         .byte $0c, $08, $0a, $00, $9e, $32, $30, $36, $34, $00, $00, $00
 
 * = $0810 "Main"
 
-.const SCREEN     = $0400
-.const BITMAP     = $2000
-.const FONT       = $4000
-.const NROWS      = 4              // char-rows in the wall (watch the border!)
-.const BAND_TOP   = 10             // first char-row of the band
-.const SCROLL_BMP = BITMAP + BAND_TOP*320
-.const MSGLEN     = 80             // chars per wall line
+.const SCREEN   = $0400
+.const COLOR    = $d800
+.const LINEBUF  = $4000
+.const NLINES   = 10
+.const BUFW     = 120
+.const CENTER   = 40
 
-.const fontptr    = $fb
+.const srcptr   = $fb
+.const dstptr   = $fd
+.const cptr     = $f9
+
+.const PH_IN    = 0
+.const PH_HOLD  = 1
+.const PH_OUT   = 2
+.const T_IN     = 130
+.const T_HOLD   = 120
+.const T_OUT    = 130
 
 start:
         sei
         lda #$35
         sta $01
-
-        // copy uppercase CHARGEN -> FONT
-        lda #$33
-        sta $01
-        ldx #0
-!fc:    lda $d000,x
-        sta FONT+$000,x
-        lda $d100,x
-        sta FONT+$100,x
-        lda $d200,x
-        sta FONT+$200,x
-        lda $d300,x
-        sta FONT+$300,x
-        lda $d400,x
-        sta FONT+$400,x
-        lda $d500,x
-        sta FONT+$500,x
-        lda $d600,x
-        sta FONT+$600,x
-        lda $d700,x
-        sta FONT+$700,x
-        inx
-        bne !fc-
-        lda #$35
-        sta $01
-
-        // clear bitmap
-        lda #$00
-        ldx #0
-!cb:    .for (var p=0; p<32; p++) { sta BITMAP + p*256, x }
-        inx
-        bne !cb-
-
-        // colour RAM: band cells visible, rest black
-        lda #$00
-        ldx #0
-!cs:    sta SCREEN+$000, x
-        sta SCREEN+$100, x
-        sta SCREEN+$200, x
-        sta SCREEN+$2e8, x
-        inx
-        bne !cs-
-
-        // VIC: bitmap mode
-        lda #$18
+        lda #$14
         sta $d018
-        lda #$3b
+        lda #$1b
         sta $d011
         lda #$08
         sta $d016
         lda #$00
         sta $d020
         sta $d021
+
+        // clear screen
+        ldx #0
+        lda #$20
+!cl:    sta SCREEN+$000,x
+        sta SCREEN+$100,x
+        sta SCREEN+$200,x
+        sta SCREEN+$2e8,x
+        inx
+        bne !cl-
+
+        // per-line colour fill
+        ldx #0
+!lc:    lda col_lo,x
+        sta cptr
+        lda col_hi,x
+        sta cptr+1
+        lda line_color,x
+        ldy #39
+!cf:    sta (cptr),y
+        dey
+        bpl !cf-
+        inx
+        cpx #NLINES
+        bne !lc-
+
+        // init line state
+        ldx #NLINES-1
+!si:    lda line_start,x
+        sta sp,x
+        dex
+        bpl !si-
+        lda #PH_IN
+        sta phase
+        lda #T_IN
+        sta phase_timer
+
+        // init music (song 0)
+        lda #music.startSong-1
+        jsr music.init
 
         // raster IRQ
         lda #<irq
@@ -121,9 +130,14 @@ irq:
         pha
         lda #$ff
         sta $d019
-        inc frame
-        jsr update_scroll
-        jsr cycle_band_colors
+
+        jsr music.play
+
+        inc $d020                  // ## debug budget band ##
+        jsr update_phase
+        jsr render
+        dec $d020
+
         pla
         tay
         pla
@@ -133,139 +147,148 @@ irq:
 
 
 //==================================================================
-// update_scroll — fully-unrolled multi-row zig-zag.
+// update_phase — IN/HOLD/OUT machine + per-line move toward target.
 //==================================================================
-update_scroll:
-        inc $d020                  // ## debug: budget band start ##
-        .for (var r=0; r<NROWS; r++) {
-            .for (var px=0; px<8; px++) {
-                .var b = SCROLL_BMP + r*320 + px
-                .var p = r*8 + px
-                .if (floor(px/2)*2 == px) {
-                    // even pixel row -> ROL (left), bit from pending_row
-                    asl pending_row + p
-                    .for (var i=39; i>=0; i--) { rol b + i*8 }
-                } else {
-                    // odd pixel row -> ROR (right), bit from pending_odd
-                    lsr pending_odd + p
-                    .for (var i=0; i<40; i++) { ror b + i*8 }
-                }
-            }
-        }
-        dec $d020                  // ## debug: budget band end ##
-
-        inc smooth
-        lda smooth
-        cmp #8
-        bne !done+
-        lda #$00
-        sta smooth
-        jsr load_chars
-!done:
-        rts
-
-
-//==================================================================
-// load_chars — for each wall row, next forward char -> pending_row,
-// next backward char -> pending_odd. Shared fwd/bwd indices, so the
-// whole wall splits and meets as one.
-//==================================================================
-load_chars:
-        .for (var r=0; r<NROWS; r++) {
-            ldx fwd_idx
-            lda walltext + r*MSGLEN, x
-            jsr set_fontptr
-            .for (var k=0; k<8; k++) {
-                ldy #k
-                lda (fontptr), y
-                sta pending_row + r*8 + k
-            }
-            ldx bwd_idx
-            lda walltext + r*MSGLEN, x
-            jsr set_fontptr
-            .for (var k=0; k<8; k++) {
-                ldy #k
-                lda (fontptr), y
-                sta pending_odd + r*8 + k
-            }
-        }
-        inc fwd_idx
-        lda fwd_idx
-        cmp #MSGLEN
-        bcc !fok+
-        lda #$00
-        sta fwd_idx
-!fok:
-        dec bwd_idx
-        bpl !bok+
-        lda #MSGLEN-1
-        sta bwd_idx
-!bok:
-        rts
-
-
-set_fontptr:
-        sta fontptr
-        lda #$00
-        sta fontptr+1
-        asl fontptr
-        rol fontptr+1
-        asl fontptr
-        rol fontptr+1
-        asl fontptr
-        rol fontptr+1
-        lda fontptr
-        clc
-        adc #<FONT
-        sta fontptr
-        lda fontptr+1
-        adc #>FONT
-        sta fontptr+1
-        rts
-
-
-//==================================================================
-// cycle_band_colors — rainbow drift on all NROWS band rows.
-//==================================================================
-cycle_band_colors:
-        ldx #39
-!cy:    txa
-        clc
-        adc frame
-        and #$0f
-        tay
-        lda rainbow, y
-        asl
-        asl
-        asl
-        asl
-        .for (var r=0; r<NROWS; r++) {
-            sta SCREEN + (BAND_TOP+r)*40, x
-        }
+update_phase:
+        dec phase_timer
+        bne !move+
+        lda phase
+        cmp #PH_IN
+        bne !notin+
+        lda #PH_HOLD
+        sta phase
+        lda #T_HOLD
+        sta phase_timer
+        ldx #NLINES-1
+!snap:  lda #CENTER
+        sta sp,x
         dex
-        bpl !cy-
+        bpl !snap-
+        rts
+!notin:
+        cmp #PH_HOLD
+        bne !nothold+
+        lda #PH_OUT
+        sta phase
+        lda #T_OUT
+        sta phase_timer
+        rts
+!nothold:
+        lda #PH_IN
+        sta phase
+        lda #T_IN
+        sta phase_timer
+        ldx #NLINES-1
+!rst:   lda line_start,x
+        sta sp,x
+        dex
+        bpl !rst-
+        rts
+
+!move:
+        ldx #NLINES-1
+!ml:    lda phase
+        cmp #PH_OUT
+        bne !tgtc+
+        lda line_exit,x
+        jmp !havetgt+
+!tgtc:  lda #CENTER
+!havetgt:
+        sta tmp
+        lda sp,x
+        cmp tmp
+        beq !mnext+
+        bcc !up+
+        sec                         // sp > target -> down by speed
+        sbc line_speed,x
+        cmp tmp
+        bcs !sset+
+        lda tmp
+        jmp !sset+
+!up:    clc                         // sp < target -> up by speed
+        adc line_speed,x
+        cmp tmp
+        bcc !sset+
+        lda tmp
+!sset:  sta sp,x
+!mnext: dex
+        bpl !ml-
+        rts
+
+
+//==================================================================
+// render — window 40 chars of each line buffer onto its screen row.
+//==================================================================
+render:
+        ldx #0
+!rl:    lda src_lo,x
+        clc
+        adc sp,x
+        sta srcptr
+        lda src_hi,x
+        adc #0
+        sta srcptr+1
+        lda dst_lo,x
+        sta dstptr
+        lda dst_hi,x
+        sta dstptr+1
+        ldy #39
+!cp:    lda (srcptr),y
+        sta (dstptr),y
+        dey
+        bpl !cp-
+        inx
+        cpx #NLINES
+        bne !rl-
         rts
 
 
 //==================================================================
 // data
 //==================================================================
-frame:    .byte 0
-smooth:   .byte 0
-fwd_idx:  .byte 0
-bwd_idx:  .byte MSGLEN-1
+phase:        .byte 0
+phase_timer:  .byte 0
+tmp:          .byte 0
+sp:           .fill NLINES, 0
 
-pending_row: .fill NROWS*8, 0
-pending_odd: .fill NROWS*8, 0
+line_start:   .fill NLINES, startList.get(i)
+line_exit:    .fill NLINES, 80 - startList.get(i)
+line_speed:   .fill NLINES, speedList.get(i)
+line_color:   .fill NLINES, colList.get(i)
 
-rainbow:
-        .byte $06, $0b, $04, $0e, $03, $05, $0d, $07
-        .byte $01, $07, $0d, $05, $03, $0e, $04, $0b
+src_lo: .fill NLINES, <(LINEBUF + i*BUFW)
+src_hi: .fill NLINES, >(LINEBUF + i*BUFW)
+dst_lo: .fill NLINES, <(SCREEN + rowList.get(i)*40)
+dst_hi: .fill NLINES, >(SCREEN + rowList.get(i)*40)
+col_lo: .fill NLINES, <(COLOR + rowList.get(i)*40)
+col_hi: .fill NLINES, >(COLOR + rowList.get(i)*40)
 
-// NROWS wall lines, MSGLEN chars each. The meet (fwd==bwd, middle char)
-// reads true — keep the middle ~20 chars a readable phrase per line.
-walltext:
-        .text "  SPLITTER OVER THE WHOLE SCREEN NOW    DEFEEST  "
-        .text "  THE WALL SHEARS INTO A ZIG ZAG AND BACK       "
-        .text "  EVEN ROWS LEFT  ODD ROWS RIGHT  THEY MEET     "
-        .text "  KLOTEN MET DE BROODTROMMEL   SEE YOU AT EVOKE "
+
+//==================================================================
+// SID music — "Dingen" by Cinder/deFEEST (load $1000, init/play there)
+//==================================================================
+* = music.location "Music"
+        .fill music.size, music.getData(i)
+
+
+//==================================================================
+// line buffers — 40 pad / line / pad to 120. Window at sp=40 -> chars
+// 40..79 (the readable line).
+//==================================================================
+.macro poemline(s) {
+        .fill 40, $20
+        .text s
+        .fill BUFW - 40 - s.size(), $20
+}
+
+* = LINEBUF "LineBuffers"
+        poemline("    DEFEEST DREAMS IN FORTY KILOBYTES   ")
+        poemline("  THE BREADBIN HUMS A RASTER LULLABY    ")
+        poemline("  PIXELS FALL LIKE FRIET FROM THE SKY   ")
+        poemline("  EVERY SCANLINE A SMALL CONFESSION     ")
+        poemline("  WE SOLDER POETRY INTO THE BORDER      ")
+        poemline("    MAYO AND MATH AND MIDNIGHT OIL      ")
+        poemline("  TWENTY MEN AND ONE EXTENSION CORD     ")
+        poemline("   THE COMPO CLOCK FORGIVES NOTHING     ")
+        poemline("   SPLIT APART TO MEET AGAIN AS ONE     ")
+        poemline("   SEE YOU AT EVOKE   KLOOT WAS HERE    ")
