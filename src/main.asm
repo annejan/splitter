@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.12  "THE SPLIT: lines break into two halves that converge to one"
+// splitter — v0.13  "venetian split-scroll banner: even/odd halves meet + wait, rainbow"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -24,6 +24,10 @@
 .var colList   = List().add($0e, $03, $0d, $07, $01, $0f, $0a, $05, $0c, $06)
 .var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
 .var speedList = List().add(2, 3, 1, 2, 3, 1, 2, 3, 2, 1)
+
+// Banner line — EXACTLY 40 chars so the meet snaps to a clean readable row.
+.var bmsg   = "    SPLITTER  -  FRISSER  DAN  OOIT     "
+.const MSGLEN = bmsg.size()   // = 40
 
 * = $0801
         .byte $0c, $08, $0a, $00, $9e, $32, $30, $36, $34, $00, $00, $00
@@ -78,6 +82,21 @@
 .const SPLIT_HOLD  = 110           // readable hold at the meet (~2.2s)
 .const SPLIT_GAP   = 40            // blank pause when fully apart
 .const SPLIT_FLASH = 6             // white colour-RAM flash frames on the meet
+
+// --- The venetian split-scroll BANNER (the kloten-intro effect, freshened):
+//     even pixel-rows ROL forward, odd pixel-rows ROR backward, fed from one
+//     message; the two halves cross and lock into readable text. We run it in
+//     CHAR mode via a RAM-font canvas (banner cells point at scratch chars so
+//     ROL/ROR over the charset bytes IS the per-pixel-row scroll) + a rainbow
+//     colour drift over the row + a white flash on the meet. Fresh, not a copy.
+.const FONT_RAM   = $3000          // RAM copy of the ROM uppercase font
+.const D018_RAM   = $1c            // screen $0400 + font $3000
+.const C1CODE     = 64             // banner 1 uses canvas char codes 64..103
+.const CANVAS1    = FONT_RAM + C1CODE*8   // $3200 — the 40-char scratch canvas
+.const BANNER1ROW = 16             // a free row (not in rowList) for the banner
+.const BSTEP      = 8              // frames per char-step (1 pixel-col / frame)
+.const SCROLLFR   = 180            // frames of venetian scroll between meets (~3.6s)
+.const BPAUSE     = 120            // frames to hold the aligned readable line (~2.4s)
 .const DEBUG    = 1                // 1 = colour-band raster profiler in the border
 .const INTRO    = 0                // 1 = run DEFEEST screenfill bloom (WIP: hangs $c07d)
 
@@ -121,7 +140,7 @@ start:
         inx
         bne !clr-
 
-        lda #$14
+        lda #D018_RAM              // screen $0400 + RAM font $3000 (for canvas)
         sta $d018
         lda #$1b
         sta $d011
@@ -171,6 +190,7 @@ start:
         ldx linecnt
 !sbn:   dex
         bpl !sb-
+        jsr init_banner            // font copy + canvas + scroll seed
         lda #PH_IN
         sta phase
         lda #T_IN
@@ -236,6 +256,9 @@ irq_work:
         jsr color_cycle
         dbg($0e)                   // LT-BLUE = split state machine + redraw
         jsr split_update
+        dbg($0a)                   // LT-RED = venetian split-scroll banner
+        jsr banner_scroll
+        jsr banner_color           // rainbow drift (also during the meet pause)
         dbg($00)                   // BLACK = idle
 
         lda #<irq_shear
@@ -612,6 +635,237 @@ fill_col_x:
 
 
 //==================================================================
+// init_banner — copy ROM font to RAM, point the banner row's cells at the
+// canvas scratch chars, clear the canvas, seed the scroll pointers/pending.
+// Call once during setup, BEFORE the display is enabled.
+//==================================================================
+init_banner:
+        // copy ROM uppercase font ($D000) -> FONT_RAM (2KB, 8 pages)
+        lda $01
+        pha
+        lda #$33                   // bank char ROM in at $D000
+        sta $01
+        lda #$00
+        sta $02
+        lda #$d0
+        sta $03
+        lda #$00
+        sta $04
+        lda #>FONT_RAM
+        sta $05
+        ldx #8
+        ldy #0
+!fc:    lda ($02),y
+        sta ($04),y
+        iny
+        bne !fc-
+        inc $03
+        inc $05
+        dex
+        bne !fc-
+        pla
+        sta $01                    // I/O back in
+
+        // banner row cells -> canvas char codes C1CODE..C1CODE+39
+        ldx #0
+!bc:    txa
+        clc
+        adc #C1CODE
+        sta SCREEN + BANNER1ROW*40, x
+        lda #$0e                   // light-blue for now (rainbow drift later)
+        sta COLOR + BANNER1ROW*40, x
+        inx
+        cpx #40
+        bne !bc-
+
+        // render the clean readable line into bsrc, and start the canvas on it
+        jsr build_bsrc
+        jsr blit_readable
+
+        // seed scroll state: even ptr at msg start (forward), odd at end (back)
+        lda #0
+        sta msg_e
+        sta bsmooth
+        sta b_sframes
+        sta b_pause
+        lda #MSGLEN-1
+        sta msg_o
+        jsr load_pending_even
+        jsr load_pending_odd
+        rts
+
+//==================================================================
+// build_bsrc — render the 40-char banner line into bsrc, in CANVAS byte
+// order (bsrc[c*8 + r] = font glyph row r of char c). Done once at init.
+//==================================================================
+build_bsrc:
+        lda #<bsrc
+        sta cptr
+        lda #>bsrc
+        sta cptr+1
+        ldx #0                     // X = char column 0..39
+!bc:    lda msg,x
+        jsr glyph_ptr              // $02/$03 = FONT_RAM + char*8
+        ldy #7
+!br:    lda ($02),y
+        sta (cptr),y               // bsrc[c*8 + r]
+        dey
+        bpl !br-
+        lda cptr                   // cptr += 8
+        clc
+        adc #8
+        sta cptr
+        bcc !nc+
+        inc cptr+1
+!nc:    inx
+        cpx #40
+        bne !bc-
+        rts
+
+//==================================================================
+// blit_readable — copy the clean line (bsrc) straight into the canvas, so
+// the meet pause shows perfectly aligned text (never scheef). 320 bytes.
+//==================================================================
+blit_readable:
+        ldx #0
+!b1:    lda bsrc,x
+        sta CANVAS1,x
+        inx
+        bne !b1-
+        ldx #0
+!b2:    lda bsrc+$100,x
+        sta CANVAS1+$100,x
+        inx
+        cpx #(320-256)
+        bne !b2-
+        rts
+
+//==================================================================
+// banner_scroll — one frame of the venetian split: even pixel-rows ROL
+// forward (from pending_even), odd pixel-rows ROR backward (from
+// pending_odd). Every BSTEP frames advance a char: even ptr forward,
+// odd ptr backward, reload pending. The two halves cross -> readable.
+//==================================================================
+banner_scroll:
+        lda b_pause                // frozen at a meet? hold the readable line
+        beq !run+
+        dec b_pause
+        rts
+!run:   ldx #0                     // X = pixel row 0..7
+!rl:    txa
+        and #$01
+        bne !odd+
+        // even row: ROL chain shifts content LEFT, new bit enters cell 39
+        asl pending_even,x
+        .for (var c = 39; c >= 0; c--) {
+            rol CANVAS1 + c*8, x
+        }
+        jmp !nx+
+!odd:   // odd row: ROR chain shifts content RIGHT, new bit enters cell 0
+        lsr pending_odd,x
+        .for (var c = 0; c <= 39; c++) {
+            ror CANVAS1 + c*8, x
+        }
+!nx:    inx
+        cpx #8
+        beq !adv+
+        jmp !rl-
+!adv:   inc bsmooth                // char-step every BSTEP frames
+        lda bsmooth
+        cmp #BSTEP
+        bne !timer+
+        lda #0
+        sta bsmooth
+        inc msg_e                  // even stream walks forward
+        lda msg_e
+        cmp #MSGLEN
+        bne !ef+
+        lda #0
+        sta msg_e
+!ef:    jsr load_pending_even
+        ldx msg_o                  // odd stream walks backward
+        bne !od+
+        ldx #MSGLEN
+!od:    dex
+        stx msg_o
+        jsr load_pending_odd
+!timer: // after SCROLLFR frames of venetian, snap to the aligned readable
+        // line (guaranteed straight, not scheef) and hold for BPAUSE frames
+        inc b_sframes
+        lda b_sframes
+        cmp #SCROLLFR
+        bne !done+
+        lda #0
+        sta b_sframes
+        jsr blit_readable          // canvas <- the clean 40-char line
+        lda #BPAUSE
+        sta b_pause
+!done:  rts
+
+// banner_color — drift a 16-hue rainbow across the banner row every frame
+// (col>>1 de-confettis it; runs even during the meet pause so it never sits
+// dead). Light, ~40 colour-RAM writes.
+banner_color:
+        lda frame
+        and #$03
+        bne !nd+
+        inc bhue
+!nd:    ldx #0
+!bc:    txa
+        lsr
+        clc
+        adc bhue
+        and #$07                   // text-safe 8-hue palette: all high-luma,
+        tay                        // so every letter stays readable at the meet
+        lda rbsafe,y
+        sta COLOR + BANNER1ROW*40, x
+        inx
+        cpx #40
+        bne !bc-
+        rts
+
+// load_pending_even/odd — fetch the 8 glyph bytes of msg[ptr] from the RAM
+// font into pending_even/odd (the bytes that scroll in over BSTEP frames).
+load_pending_even:
+        ldx msg_e
+        lda msg,x
+        jsr glyph_ptr
+        ldy #7
+!f:     lda ($02),y
+        sta pending_even,y
+        dey
+        bpl !f-
+        rts
+load_pending_odd:
+        ldx msg_o
+        lda msg,x
+        jsr glyph_ptr
+        ldy #7
+!f:     lda ($02),y
+        sta pending_odd,y
+        dey
+        bpl !f-
+        rts
+// glyph_ptr — A = char code -> $02/$03 = FONT_RAM + A*8
+glyph_ptr:
+        pha
+        asl
+        asl
+        asl
+        sta $02                    // low = (char<<3) & $ff
+        pla
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        clc
+        adc #>FONT_RAM             // high = (char>>5) + FONT_RAM page
+        sta $03
+        rts
+
+
+//==================================================================
 // data
 //==================================================================
 phase:        .byte 0
@@ -634,20 +888,34 @@ ssub:  .fill NLINES, SP_GAP            // sub-phase, start apart
 stmr:  .fill NLINES, 1 + i*22          // staggered start so meets don't sync
 sflash:.fill NLINES, 0                 // white-flash countdown after a meet
 
+// banner venetian split-scroll state
+msg_e:        .byte 0                  // even-stream char index (walks forward)
+msg_o:        .byte 0                  // odd-stream char index (walks backward)
+bsmooth:      .byte 0                  // 0..BSTEP-1 pixel-column counter
+b_pause:      .byte 0                  // >0 = holding the aligned readable line
+b_sframes:    .byte 0                  // venetian-scroll frame counter -> next meet
+bhue:         .byte 0                  // rainbow drift phase for the banner row
+pending_even: .fill 8, 0               // 8 glyph bytes scrolling in (even rows)
+pending_odd:  .fill 8, 0               // 8 glyph bytes scrolling in (odd rows)
+msg:          .text bmsg               // the scroll message (screencode_upper)
+
 line_start:   .fill NLINES, startList.get(i)
 line_exit:    .fill NLINES, 80 - startList.get(i)
 line_speed:   .fill NLINES, speedList.get(i)
 line_color:   .fill NLINES, colList.get(i)
 
-// per-line role: 0 static, 1 swim, 2 split. Two splits (rows 2,14) + one
-// swim (row 8) on orthogonal axes, staggered; the rest static negative space.
-role:         .byte R_SPLIT, 0, 0, 0, R_SWIM, 0, 0, 0, R_SPLIT, 0
+// per-line role: 0 static, 1 swim, 2 split(center-column, retired). The real
+// split is now the venetian banner (row 16); keep one swim line for variety.
+role:         .byte 0, 0, 0, 0, R_SWIM, 0, 0, 0, 0, 0
 // first raster line of each poetry row (display top 51 + row*8)
 line_scan:    .fill NLINES, 51 + rowList.get(i)*8
 // all 16 C64 colours in a hue-ish order, for the drifting rainbow
 rainbow16:
         .byte $01, $07, $08, $0a, $02, $04, $06, $0e
         .byte $03, $0d, $05, $0c, $0f, $0b, $09, $00
+// text-safe rainbow (luma 12..32, no dark blue/brown/red) so the banner line
+// reads cleanly at the meet while still cycling all the bright hues
+rbsafe: .byte $08, $0a, $07, $0d, $01, $03, $0e, $04
 
 src_lo: .fill NLINES, <(LINEBUF + i*BUFW)
 src_hi: .fill NLINES, >(LINEBUF + i*BUFW)
@@ -673,6 +941,9 @@ wave_sine: .fill 256, D016BASE + round(3 * sin(toRadians(i * 360 * 4 / 256)))
 
 .align 256
 shear_tab: .fill 256, D016BASE
+
+// the clean readable banner line, pre-rendered in CANVAS byte order
+bsrc: .fill 320, 0
 
 
 //==================================================================
