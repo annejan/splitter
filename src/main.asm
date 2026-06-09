@@ -158,11 +158,12 @@ irq_work:
         jsr render
         jmp !workdone+
 !oddframe:
-        // ODD frame: rebuild the shear table. Splitting render/build
-        // across frames keeps either single frame inside the budget so
-        // the beam never laps us — animation steps at 25fps, but music
-        // and the shear DISPLAY stay a solid 50Hz.
+        // ODD frame: shear table + the rainbow. Splitting render off the
+        // build/colour frame keeps either single frame inside the budget
+        // so the beam never laps us — animation steps at 25fps, music and
+        // the shear DISPLAY stay a solid 50Hz.
         jsr build_shear
+        jsr color_cycle
 !workdone:
         dec $d020
 
@@ -223,37 +224,13 @@ build_shear:
         lda phase
         cmp #PH_HOLD
         bne !breathe+
-        lda #0                     // readable MEET -> no shear (clean)
+        lda #$00                   // readable MEET -> no shear (clean)
         beq !setamp+
 !breathe:
         ldx frame
         lda sine_amp,x             // slow breath 0..3 while lines move
 !setamp:
         sta amp
-
-        // cycle the shear MODE every MODE_TIME frames
-        dec mode_timer
-        bne !disp+
-        lda #MODE_TIME
-        sta mode_timer
-        ldx mode
-        inx
-        cpx #3
-        bcc !ms+
-        ldx #0
-!ms:    stx mode
-!disp:
-        lda mode
-        bne !n0+
-        jmp build_zigzag
-!n0:    cmp #1
-        bne !n1+
-        jmp build_wave
-!n1:    jmp build_rowweave
-
-
-// mode 0 — per-scanline zig-zag: even +A / odd -A (the fine weave)
-build_zigzag:
         lda #D016BASE
         clc
         adc amp
@@ -262,56 +239,77 @@ build_zigzag:
         sec
         sbc amp
         sta od
-        ldx #TOP
-!fb:    lda ev
-        sta shear_tab,x
-        inx
+
+        // per-LINE role: SPLIT rows weave (zig-zag), clean rows stay flat
+        ldx #NLINES-1
+!bl:    ldy line_scan,x
+        lda role,x
+        beq !clean+
+        lda ev                     // SPLIT: 8 scanlines, even ev / odd od
+        sta shear_tab,y
+        iny
         lda od
-        sta shear_tab,x
-        inx
-        cpx #BOT
-        bcc !fb-
+        sta shear_tab,y
+        iny
+        lda ev
+        sta shear_tab,y
+        iny
+        lda od
+        sta shear_tab,y
+        iny
+        lda ev
+        sta shear_tab,y
+        iny
+        lda od
+        sta shear_tab,y
+        iny
+        lda ev
+        sta shear_tab,y
+        iny
+        lda od
+        sta shear_tab,y
+        jmp !nx+
+!clean: lda #D016BASE              // SCROLL/clean: 8 flat scanlines
+        sta shear_tab,y
+        iny
+        sta shear_tab,y
+        iny
+        sta shear_tab,y
+        iny
+        sta shear_tab,y
+        iny
+        sta shear_tab,y
+        iny
+        sta shear_tab,y
+        iny
+        sta shear_tab,y
+        iny
+        sta shear_tab,y
+!nx:    dex
+        bpl !bl-
         rts
 
-// mode 1 — traveling sine wave flowing down the screen
-build_wave:
-        inc wave_scroll
-        ldx #TOP
-!wv:    txa
-        clc
-        adc wave_scroll
-        tay
-        lda wave_sine,y
-        sta shear_tab,x
-        inx
-        cpx #BOT
-        bcc !wv-
-        rts
 
-// mode 2 — per char-row weave: whole rows shift +A / -A, breathing
-build_rowweave:
-        lda #D016BASE
-        clc
-        adc amp
-        sta ev
-        lda #D016BASE
-        sec
-        sbc amp
-        sta od
-        ldx #TOP
-!rw:    txa
-        lsr
-        lsr
-        lsr
-        and #1
-        beq !rev+
-        lda od
-        jmp !rst+
-!rev:   lda ev
-!rst:   sta shear_tab,x
-        inx
-        cpx #BOT
-        bcc !rw-
+//==================================================================
+// color_cycle — per-char 16-colour rainbow drifting diagonally. The
+// whole palette in motion (jonguh, demoscene). Unrolled per row; runs
+// on the odd frame next to build_shear so it stays inside 50 Hz.
+//==================================================================
+color_cycle:
+        .for (var r=0; r<NLINES; r++) {
+            ldx #39
+        !cc:
+            txa
+            clc
+            adc frame
+            adc #(r*5)             // diagonal phase per row
+            and #$0f
+            tay
+            lda rainbow16,y
+            sta COLOR + rowList.get(r)*40, x
+            dex
+            bpl !cc-
+        }
         rts
 
 
@@ -344,6 +342,15 @@ update_phase:
         sta phase
         lda #T_IN
         sta phase_timer
+        // rotate roles -> the sexy splits land on new lines each cycle
+        ldx role+0
+        ldy #0
+!rot:   lda role+1,y
+        sta role,y
+        iny
+        cpy #NLINES-1
+        bne !rot-
+        stx role + NLINES-1
         ldx #NLINES-1
 !rst:   lda line_start,x
         sta sp,x
@@ -424,6 +431,15 @@ line_start:   .fill NLINES, startList.get(i)
 line_exit:    .fill NLINES, 80 - startList.get(i)
 line_speed:   .fill NLINES, speedList.get(i)
 line_color:   .fill NLINES, colList.get(i)
+
+// per-line role (1 = SPLIT/sexy weave, 0 = clean) — rotated each cycle
+role:         .byte 1, 0, 0, 1, 0, 0, 0, 1, 0, 0
+// first raster line of each poetry row (display top 51 + row*8)
+line_scan:    .fill NLINES, 51 + rowList.get(i)*8
+// all 16 C64 colours in a hue-ish order, for the drifting rainbow
+rainbow16:
+        .byte $01, $07, $08, $0a, $02, $04, $06, $0e
+        .byte $03, $0d, $05, $0c, $0f, $0b, $09, $00
 
 src_lo: .fill NLINES, <(LINEBUF + i*BUFW)
 src_hi: .fill NLINES, >(LINEBUF + i*BUFW)
