@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.11  "Rubberband Swim, de-mushed: VSTEP $03 + AMP 3 = readable lean"
+// splitter — v0.12  "THE SPLIT: lines break into two halves that converge to one"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -63,6 +63,21 @@
                                    //   ~3.6px = each glyph torn top-vs-bottom = the mush we saw.
 .const ROWOFF   = $20              // phase offset between hero rows (they swim out of phase)
 .const SWIMSPD  = 2                // master phase advance / frame = travel speed
+// --- The Split (the demo's heart): a line breaks into two halves that
+//     slide out the side borders and converge back to one readable line.
+//     Left half = cols 0..19, right half = cols 20..39, both carrying the
+//     SAME pre-split line; sep 20=apart/blank .. 0=met/readable.
+.const R_STATIC = 0                // role: drawn once, no per-frame work
+.const R_SWIM   = 1                // role: the $d016 sine swim (shear)
+.const R_SPLIT  = 2                // role: the split/meet
+.const SP_CLOSE = 0                // sub-phase: halves converging (20->0)
+.const SP_HOLD  = 1                // sub-phase: met, readable, held
+.const SP_OPEN  = 2                // sub-phase: halves diverging (0->20)
+.const SP_GAP   = 3                // sub-phase: apart, blank pause
+.const SPLIT_STEP  = 3             // frames per 1-col sep step (20 steps ~ 1.2s)
+.const SPLIT_HOLD  = 110           // readable hold at the meet (~2.2s)
+.const SPLIT_GAP   = 40            // blank pause when fully apart
+.const SPLIT_FLASH = 6             // white colour-RAM flash frames on the meet
 .const DEBUG    = 1                // 1 = colour-band raster profiler in the border
 .const INTRO    = 0                // 1 = run DEFEEST screenfill bloom (WIP: hangs $c07d)
 
@@ -145,6 +160,17 @@ start:
         dex
         bpl !si-
         jsr render                 // draw the whole poem ONCE (static)
+        // split lines start apart (sep=20 -> blank); draw them so they don't
+        // flash their full text for a frame before the state machine kicks in
+        ldx #NLINES-1
+!sb:    stx linecnt
+        lda role,x
+        cmp #R_SPLIT
+        bne !sbn+
+        jsr render_split_x
+        ldx linecnt
+!sbn:   dex
+        bpl !sb-
         lda #PH_IN
         sta phase
         lda #T_IN
@@ -201,13 +227,15 @@ irq_work:
         // frame and stay tiny. Coloured debug bands graph the cost.
         dbg($02)                   // RED = SID player
         jsr music.play
-        dbg($07)                   // YELLOW = phase + rotation
+        dbg($07)                   // YELLOW = phase machine
         jsr update_phase
         inc frame
-        dbg($04)                   // PURPLE = shear table (3 hero rows)
+        dbg($04)                   // PURPLE = shear table (swim rows)
         jsr build_shear
-        dbg($05)                   // GREEN = rainbow (3 hero rows)
+        dbg($05)                   // GREEN = rainbow (swim rows)
         jsr color_cycle
+        dbg($0e)                   // LT-BLUE = split state machine + redraw
+        jsr split_update
         dbg($00)                   // BLACK = idle
 
         lda #<irq_shear
@@ -328,8 +356,9 @@ color_cycle:
         lda #NLINES-1
         sta linecnt
 !cl:    ldx linecnt
-        lda role,x                 // only HERO rows rainbow; static stay plain
-        beq !skip+
+        lda role,x                 // only SWIM rows rainbow; split/static stay plain
+        cmp #R_SWIM
+        bne !skip+
         lda col_lo,x
         sta cptr
         lda col_hi,x
@@ -397,16 +426,8 @@ update_phase:
         sta phase
         lda #T_IN
         sta phase_timer
-        // rotate roles -> the sexy splits land on new lines each cycle
-        ldx role+0
-        ldy #0
-!rot:   lda role+1,y
-        sta role,y
-        iny
-        cpy #NLINES-1
-        bne !rot-
-        stx role + NLINES-1
-        jsr recolor_all            // drop the old hero rainbows back to plain
+        // roles are FIXED while we dial in the split — no rotation (it would
+        // shuffle which lines split mid-flight and fight the state machine).
         rts
 !move:
         rts                        // text is static — no per-frame slide
@@ -437,6 +458,160 @@ render:
 
 
 //==================================================================
+// split_update — per frame, drive every R_SPLIT line's state machine.
+// sep steps once every SPLIT_STEP frames; we only re-draw the row on a
+// step (cheap). MEET (sep=0) snaps a white colour flash + holds readable.
+//==================================================================
+split_update:
+        lda #NLINES-1
+        sta linecnt
+!su:    ldx linecnt
+        lda role,x
+        cmp #R_SPLIT
+        beq !live+
+        jmp !next+
+!live:
+        lda sflash,x               // white-flash decay after a meet
+        beq !noflash+
+        dec sflash,x
+        bne !noflash+
+        lda line_color,x           // flash ended -> restore the line's colour
+        jsr fill_col_x
+        ldx linecnt
+!noflash:
+        dec stmr,x
+        beq !step+
+        jmp !next+
+
+!step:  lda ssub,x                 // timer hit 0 -> advance the state machine
+        cmp #SP_CLOSE
+        beq !close+
+        cmp #SP_HOLD
+        beq !hold+
+        cmp #SP_OPEN
+        beq !open+
+        // SP_GAP done -> begin closing
+        lda #SP_CLOSE
+        sta ssub,x
+        lda #SPLIT_STEP
+        sta stmr,x
+        jmp !next+
+
+!close: dec sep,x
+        bne !stepdraw+
+        // reached 0 -> MEET: flash white, hold readable
+        lda #SP_HOLD
+        sta ssub,x
+        lda #SPLIT_HOLD
+        sta stmr,x
+        lda #SPLIT_FLASH
+        sta sflash,x
+        lda #$01                   // white reunion flash
+        jsr fill_col_x
+        jsr render_split_x
+        jmp !next+
+
+!hold:  lda #SP_OPEN               // held long enough -> diverge again
+        sta ssub,x
+        lda #SPLIT_STEP
+        sta stmr,x
+        jmp !next+
+
+!open:  inc sep,x
+        lda sep,x
+        cmp #20
+        bcc !stepdraw+
+        lda #SP_GAP                // fully apart -> blank pause
+        sta ssub,x
+        lda #SPLIT_GAP
+        sta stmr,x
+        jsr render_split_x
+        jmp !next+
+
+!stepdraw:
+        lda #SPLIT_STEP
+        sta stmr,x
+        jsr render_split_x
+!next:  dec linecnt
+        bmi !sudone+
+        jmp !su-
+!sudone:
+        rts
+
+//==================================================================
+// render_split_x — draw line `linecnt` as two converging halves.
+//   left  col c (0..19): k=c+sep ; k<20 ? text[k] : space
+//   right col c (20..39): k=c-sep ; k>=20 ? text[k] : space
+// X=column, Y=k (text idx), srcptr=text base (=buffer+CENTER), store
+// self-modded to the row's screen address. ~1000 cy, only on a step.
+//==================================================================
+render_split_x:
+        ldx linecnt
+        lda src_lo,x               // srcptr = buffer + CENTER (= text[0])
+        clc
+        adc #CENTER
+        sta srcptr
+        lda src_hi,x
+        adc #0
+        sta srcptr+1
+        lda dst_lo,x               // patch both store targets to this row
+        sta !rsl+ +1
+        sta !rsr+ +1
+        lda dst_hi,x
+        sta !rsl+ +2
+        sta !rsr+ +2
+        lda sep,x
+        sta tmp                    // sep
+        ldx #0
+!lh:    txa                        // left half, c = 0..19
+        clc
+        adc tmp                    // k = c + sep
+        cmp #20
+        bcs !lsp+
+        tay
+        lda (srcptr),y
+        jmp !lput+
+!lsp:   lda #$20
+!lput:
+!rsl:   sta $0400,x                // self-modified row address
+        inx
+        cpx #20
+        bne !lh-
+!rh:    txa                        // right half, c = 20..39
+        sec
+        sbc tmp                    // k = c - sep
+        cmp #20
+        bcc !rsp+                  // k < 20 -> space
+        tay
+        lda (srcptr),y
+        jmp !rput+
+!rsp:   lda #$20
+!rput:
+!rsr:   sta $0400,x
+        inx
+        cpx #40
+        bne !rh-
+        rts
+
+//==================================================================
+// fill_col_x — fill colour RAM for line `linecnt` with the colour in A.
+//==================================================================
+fill_col_x:
+        pha
+        ldx linecnt
+        lda col_lo,x
+        sta cptr
+        lda col_hi,x
+        sta cptr+1
+        pla
+        ldy #39
+!fc:    sta (cptr),y
+        dey
+        bpl !fc-
+        rts
+
+
+//==================================================================
 // data
 //==================================================================
 phase:        .byte 0
@@ -453,13 +628,20 @@ linecnt:      .byte 0
 swimphase:    .byte 0
 sp:           .fill NLINES, 0
 
+// per-line split state (only R_SPLIT lines use it)
+sep:   .fill NLINES, 20                // separation: 20=apart/blank, 0=met
+ssub:  .fill NLINES, SP_GAP            // sub-phase, start apart
+stmr:  .fill NLINES, 1 + i*22          // staggered start so meets don't sync
+sflash:.fill NLINES, 0                 // white-flash countdown after a meet
+
 line_start:   .fill NLINES, startList.get(i)
 line_exit:    .fill NLINES, 80 - startList.get(i)
 line_speed:   .fill NLINES, speedList.get(i)
 line_color:   .fill NLINES, colList.get(i)
 
-// per-line role (1 = SPLIT/sexy weave, 0 = clean) — rotated each cycle
-role:         .byte 1, 0, 0, 1, 0, 0, 0, 1, 0, 0
+// per-line role: 0 static, 1 swim, 2 split. Two splits (rows 2,14) + one
+// swim (row 8) on orthogonal axes, staggered; the rest static negative space.
+role:         .byte R_SPLIT, 0, 0, 0, R_SWIM, 0, 0, 0, R_SPLIT, 0
 // first raster line of each poetry row (display top 51 + row*8)
 line_scan:    .fill NLINES, 51 + rowList.get(i)*8
 // all 16 C64 colours in a hue-ish order, for the drifting rainbow
@@ -473,6 +655,10 @@ dst_lo: .fill NLINES, <(SCREEN + rowList.get(i)*40)
 dst_hi: .fill NLINES, >(SCREEN + rowList.get(i)*40)
 col_lo: .fill NLINES, <(COLOR + rowList.get(i)*40)
 col_hi: .fill NLINES, >(COLOR + rowList.get(i)*40)
+
+// The 256-byte tables live ABOVE the SID ($1000-$144e), in the free gap
+// before the line buffers ($4000). Keeps the Main code+state under $1000.
+* = $1500 "Tables"
 
 // Rubberband Swim sine: $d016 values $08..$0f (38-col bit always set,
 // xscroll 0..7) so the column mode never flickers — only the shear swings.
