@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.15  "demo-viby: flowing rasterbars + 3 swim lines + venetian banner"
+// splitter — v0.16  "cycle fix: never render banner + rainbow in the same frame"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -251,16 +251,19 @@ irq_work:
         dbg($07)                   // YELLOW = phase machine
         jsr update_phase
         inc frame
+        inc barscroll              // flowing rasterbar wash drifts down
         dbg($04)                   // PURPLE = shear table (swim rows)
         jsr build_shear
-        dbg($05)                   // GREEN = rainbow (swim rows)
-        jsr color_cycle
-        dbg($0e)                   // LT-BLUE = split state machine + redraw
+        dbg($0e)                   // LT-BLUE = split state machine
         jsr split_update
-        dbg($0a)                   // LT-RED = venetian split-scroll banner
+        dbg($0a)                   // LT-RED = venetian banner (sets b_did_render)
         jsr banner_scroll
-        jsr banner_color           // rainbow drift (also during the meet pause)
-        inc barscroll              // flowing rasterbar wash drifts down
+        jsr banner_color
+        dbg($05)                   // GREEN = rainbow — SKIP on a banner-render
+        lda b_did_render           //   frame so render+rainbow never share a frame
+        bne !nocolor+
+        jsr color_cycle
+!nocolor:
         dbg($00)                   // BLACK = idle
 
         lda #<irq_shear
@@ -855,6 +858,8 @@ render_banner:
 // repeat. The meet is REACHED by motion (no snap), in a connected flow.
 //==================================================================
 banner_scroll:
+        lda #0
+        sta b_did_render           // cleared unless we rebuild the canvas below
         lda bs_sub
         bne !move+
         // HOLD at the meet (s=0, readable)
@@ -889,6 +894,8 @@ banner_scroll:
         lda #BPAUSE
         sta bs_tmr
 !render:
+        lda #1                     // heavy frame — tell irq_work to skip color_cycle
+        sta b_did_render
         jsr render_banner
 !done:  rts
 
@@ -963,6 +970,7 @@ bs_dir:       .byte 1                  // +1 diverge / $ff converge
 bs_tmr:       .byte 0                  // sub-phase timer
 bhue:         .byte 0                  // rainbow drift phase for the banner row
 barscroll:    .byte 0                  // flowing-rasterbar scroll offset
+b_did_render: .byte 0                  // 1 = banner rebuilt the canvas this frame
 msg:          .text bmsg               // the banner line (screencode_upper)
 
 line_start:   .fill NLINES, startList.get(i)
