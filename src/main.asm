@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.32  "TWO venetian split-banners, alternating stream, 50Hz"
+// splitter — v0.33  "fast split banner on top, slow one below (2:1 weighted stream)"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -100,7 +100,7 @@
 .const C2CODE     = 104            // banner 2 uses canvas char codes 104..143
 .const CANVAS2    = FONT_RAM + C2CODE*8   // $3340 — banner 2's scratch canvas
 .const BANNER2ROW = 1              // top row (above the poem, outside the band)
-.const BPAUSE2    = 300            // banner 2 holds its meet longer (different tempo)
+.const BPAUSE2    = 70             // TOP banner: short hold -> fast, keeps scrolling
 .const SMAX       = 40             // FULL line width: the halves slide the whole 40 cols
                                    //   (fully off + back) so the sweep covers the entire
                                    //   line — not a fixed shorter reach that left part of
@@ -108,7 +108,7 @@
 .const BSTEP2     = 1              // step every frame -> with the even/odd split that
                                    //   lands a char-step every 2 frames (25Hz motion)
                                    //   while each frame stays <=3.8k cy -> 50Hz held
-.const BPAUSE     = 220            // long readable hold (~4.4s) so the meet still dominates
+.const BPAUSE     = 360            // BOTTOM banner: long hold -> slow, sits readable
 .const osrc       = $f9            // zp pair (= cptr) reused as odd-row source ptr
 .const DEBUG    = 1                // 1 = colour-band raster profiler in the border
 .const BARS     = 0                // 1 = flowing $d021 rasterbars (needs a stable raster
@@ -266,15 +266,21 @@ irq_work:
         jsr update_phase
         inc frame
         dbg($0a)                   // LT-RED = venetian banner (sets b_did_render)
-        // Stream only ONE banner per frame (alternating) so we never pay both
-        // ~2.4k ROL/ROR passes in one frame -> 50Hz holds. Each banner then
-        // scrolls 1px every 2 frames (still smooth, half speed).
-        lda frame
-        and #$01
-        bne !b2+
-        jsr banner_scroll          // even frame: banner 1
+        // Stream only ONE banner per frame (50Hz). WEIGHTED 2:1 so the TOP
+        // banner (2) scrolls fast and the BOTTOM banner (1) scrolls slow:
+        // top gets 2 of every 3 frames, bottom 1.
+        inc b3ctr
+        lda b3ctr
+        cmp #3
+        bcc !c3+
+        lda #0
+        sta b3ctr
+!c3:    lda b3ctr
+        cmp #2
+        bcs !slow+
+        jsr banner_scroll2         // TOP (fast) — 2 of 3 frames
         jmp !bcol+
-!b2:    jsr banner_scroll2         // odd frame: banner 2
+!slow:  jsr banner_scroll          // BOTTOM (slow) — 1 of 3 frames
 !bcol:  jsr banner_color           // colours are cheap -> both every frame
         jsr banner_color2
         dbg($04)                   // PURPLE = shear table (swim rows)
@@ -1060,6 +1066,7 @@ bcol:         .byte 0                  // bsrc column currently feeding in (0..M
 bsmooth:      .byte 0                  // 0..7 bit counter within a char-column
 pending_even: .fill 8, 0               // incoming column bytes for the even (ROL) rows
 pending_odd:  .fill 8, 0               // incoming column bytes for the odd (ROR) rows
+b3ctr:        .byte 0                  // 0..2 weighting counter (top:bottom = 2:1)
 bs_sub2:      .byte 0                  // banner 2 state (own canvas/message/tempo)
 bs_tmr2:      .byte 0
 bcol2:        .byte 0
