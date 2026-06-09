@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.25  "banner: continuous wrap-scroll — nothing disappears, symmetric, full-width"
+// splitter — v0.26  "more golfjes: 7 swim rows undulating, rest rows for contrast"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -1088,7 +1088,7 @@ line_color:   .fill NLINES, colList.get(i)
 // per-line role: 0 static, 1 swim, 2 split(center-column, retired). The real
 // split is the venetian banner (row 16); 3 swim lines (rows 3/8/13) keep the
 // poem wall alive, staggered with static lines between for readability.
-role:         .byte 0, R_SWIM, 0, 0, R_SWIM, 0, 0, R_SWIM, 0, 0
+role:         .byte R_SWIM, R_SWIM, 0, R_SWIM, R_SWIM, 0, R_SWIM, R_SWIM, 0, R_SWIM
 // first raster line of each poetry row (display top 51 + row*8)
 line_scan:    .fill NLINES, 50 + rowList.get(i)*8   // 50 (not 51): the shear value
                                    // written during a line affects THAT line, so place
