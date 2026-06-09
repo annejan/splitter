@@ -1,20 +1,18 @@
 //==================================================================
-// splitter — v0.2  "per-pixel-row zig-zag split"
+// splitter — v0.3  "zig-zag wall (multi-row)"
 //
-// THE effect: one bitmap scroller, but its 8 pixel rows are split —
-// EVEN pixel rows scroll LEFT, ODD pixel rows scroll RIGHT. A forward
-// text stream feeds the even rows, a backward stream the odd rows, so
-// the wall of text shears into a fine zig-zag and resolves into one
-// readable line when the two streams cross in the middle. (The trick
-// from the x2026 intro, isolated.)
+// The per-pixel-row zig-zag from v0.2, now a WALL: NROWS char-rows
+// stacked, each a line of text, all shearing into the same zig-zag and
+// meeting together. Even pixel rows scroll LEFT (forward stream), odd
+// rows scroll RIGHT (backward stream); they cross in the middle and the
+// whole wall reads true for a beat.
 //
-// Per pixel row x (0..7): a 40-cell ROL chain (left) or ROR chain
-// (right), new bit fed from pending_row[x] / pending_odd[x]. Every 8
-// sub-pixel steps a fresh char is loaded into the pending buffers.
-//
-// $d020 is used the classic way: inc at the top of the shifter, dec at
-// the bottom — the border band shows exactly how much raster time the
-// zig-zag eats. Standalone PRG, BASIC stub SYS 2064 -> $0810.
+// The shifter is fully unrolled (KA .for over row/pixel-row/cell) -> no
+// loop overhead, just a long ROL/ROR blob. $d020 inc/dec brackets it so
+// the border band shows exactly how much raster time the wall costs —
+// the classic way to find the per-frame budget ceiling. Push NROWS up
+// until the border band gets fat, then stop (or switch to a cheaper
+// full-screen technique: $d016 per-scanline shear).
 //==================================================================
 .cpu _6502
 .encoding "screencode_upper"
@@ -24,22 +22,22 @@
 
 * = $0810 "Main"
 
-.const SCREEN     = $0400          // bitmap colour RAM (hi nibble = fg)
+.const SCREEN     = $0400
 .const BITMAP     = $2000
-.const FONT       = $4000          // uppercase CHARGEN copied here
-.const SCROLL_ROW = 12             // char-row of the scroller band
-.const SCROLL_BMP = BITMAP + SCROLL_ROW*320   // $2F00
-.const SCREEN_ROW = SCREEN + SCROLL_ROW*40    // $04E0 (band's colour cells)
+.const FONT       = $4000
+.const NROWS      = 4              // char-rows in the wall (watch the border!)
+.const BAND_TOP   = 10             // first char-row of the band
+.const SCROLL_BMP = BITMAP + BAND_TOP*320
+.const MSGLEN     = 80             // chars per wall line
 
-.const fontptr    = $fb            // ZP 16-bit glyph pointer
-.const MSGLEN     = 80             // message length (4 rows x 20 chars)
+.const fontptr    = $fb
 
 start:
         sei
         lda #$35
         sta $01
 
-        // --- copy uppercase CHARGEN ($D000 with $01=$33) to FONT ---
+        // copy uppercase CHARGEN -> FONT
         lda #$33
         sta $01
         ldx #0
@@ -64,16 +62,14 @@ start:
         lda #$35
         sta $01
 
-        // --- clear bitmap $2000-$3FFF to 0 ---
+        // clear bitmap
         lda #$00
         ldx #0
-!cb:    .for (var p=0; p<32; p++) {
-            sta BITMAP + p*256, x
-        }
+!cb:    .for (var p=0; p<32; p++) { sta BITMAP + p*256, x }
         inx
         bne !cb-
 
-        // --- colour RAM: band cells visible (white fg), rest black ---
+        // colour RAM: band cells visible, rest black
         lda #$00
         ldx #0
 !cs:    sta SCREEN+$000, x
@@ -82,24 +78,19 @@ start:
         sta SCREEN+$2e8, x
         inx
         bne !cs-
-        ldx #39
-        lda #$10                   // hi nibble = white fg, lo = black bg
-!cband: sta SCREEN_ROW, x
-        dex
-        bpl !cband-
 
-        // --- VIC: bitmap mode, screen $0400, bitmap $2000 ---
+        // VIC: bitmap mode
         lda #$18
-        sta $d018                  // VM=$0400, bitmap base $2000
+        sta $d018
         lda #$3b
-        sta $d011                  // BMM + DEN + 25 rows + yscroll 3
+        sta $d011
         lda #$08
-        sta $d016                  // hires, 40 cols
+        sta $d016
         lda #$00
         sta $d020
         sta $d021
 
-        // --- raster IRQ ---
+        // raster IRQ
         lda #<irq
         sta $fffe
         lda #>irq
@@ -122,9 +113,6 @@ start:
 !loop:  jmp !loop-
 
 
-//==================================================================
-// raster IRQ
-//==================================================================
 irq:
         pha
         txa
@@ -133,11 +121,9 @@ irq:
         pha
         lda #$ff
         sta $d019
-
         inc frame
         jsr update_scroll
         jsr cycle_band_colors
-
         pla
         tay
         pla
@@ -147,37 +133,27 @@ irq:
 
 
 //==================================================================
-// update_scroll — the zig-zag shifter. Even pixel rows ROL (left),
-// odd ROR (right). $d020 brackets show the raster cost (debug).
+// update_scroll — fully-unrolled multi-row zig-zag.
 //==================================================================
 update_scroll:
-        inc $d020                  // ## debug: routine start ##
-        ldx #0
-!rowloop:
-        txa
-        and #$01
-        bne !odd+
-        // even pixel row -> shift LEFT, new bit from pending_row[x] bit7
-        asl pending_row, x
-        .for (var i=39; i>=0; i--) {
-            rol SCROLL_BMP + i*8, x
+        inc $d020                  // ## debug: budget band start ##
+        .for (var r=0; r<NROWS; r++) {
+            .for (var px=0; px<8; px++) {
+                .var b = SCROLL_BMP + r*320 + px
+                .var p = r*8 + px
+                .if (floor(px/2)*2 == px) {
+                    // even pixel row -> ROL (left), bit from pending_row
+                    asl pending_row + p
+                    .for (var i=39; i>=0; i--) { rol b + i*8 }
+                } else {
+                    // odd pixel row -> ROR (right), bit from pending_odd
+                    lsr pending_odd + p
+                    .for (var i=0; i<40; i++) { ror b + i*8 }
+                }
+            }
         }
-        jmp !next+
-!odd:
-        // odd pixel row -> shift RIGHT, new bit from pending_odd[x] bit0
-        lsr pending_odd, x
-        .for (var i=0; i<40; i++) {
-            ror SCROLL_BMP + i*8, x
-        }
-!next:
-        inx
-        cpx #8
-        beq !rldone+
-        jmp !rowloop-
-!rldone:
-        dec $d020                  // ## debug: routine end ##
+        dec $d020                  // ## debug: budget band end ##
 
-        // advance sub-pixel; every 8 steps load the next chars
         inc smooth
         lda smooth
         cmp #8
@@ -190,19 +166,29 @@ update_scroll:
 
 
 //==================================================================
-// load_chars — pull the next forward char into pending_row and the
-// next backward char into pending_odd. fwd walks +1, bwd walks -1;
-// they cross in the middle (the "meet" where the zig-zag reads true).
+// load_chars — for each wall row, next forward char -> pending_row,
+// next backward char -> pending_odd. Shared fwd/bwd indices, so the
+// whole wall splits and meets as one.
 //==================================================================
 load_chars:
-        ldx fwd_idx
-        lda message, x
-        jsr set_fontptr
-        ldy #7
-!lf:    lda (fontptr), y
-        sta pending_row, y
-        dey
-        bpl !lf-
+        .for (var r=0; r<NROWS; r++) {
+            ldx fwd_idx
+            lda walltext + r*MSGLEN, x
+            jsr set_fontptr
+            .for (var k=0; k<8; k++) {
+                ldy #k
+                lda (fontptr), y
+                sta pending_row + r*8 + k
+            }
+            ldx bwd_idx
+            lda walltext + r*MSGLEN, x
+            jsr set_fontptr
+            .for (var k=0; k<8; k++) {
+                ldy #k
+                lda (fontptr), y
+                sta pending_odd + r*8 + k
+            }
+        }
         inc fwd_idx
         lda fwd_idx
         cmp #MSGLEN
@@ -210,14 +196,6 @@ load_chars:
         lda #$00
         sta fwd_idx
 !fok:
-        ldx bwd_idx
-        lda message, x
-        jsr set_fontptr
-        ldy #7
-!lb:    lda (fontptr), y
-        sta pending_odd, y
-        dey
-        bpl !lb-
         dec bwd_idx
         bpl !bok+
         lda #MSGLEN-1
@@ -226,11 +204,8 @@ load_chars:
         rts
 
 
-//==================================================================
-// set_fontptr — fontptr = FONT + (A * 8)
-//==================================================================
 set_fontptr:
-        sta fontptr                // A = char (0..255), low for now
+        sta fontptr
         lda #$00
         sta fontptr+1
         asl fontptr
@@ -238,7 +213,7 @@ set_fontptr:
         asl fontptr
         rol fontptr+1
         asl fontptr
-        rol fontptr+1              // fontptr = char*8
+        rol fontptr+1
         lda fontptr
         clc
         adc #<FONT
@@ -250,8 +225,7 @@ set_fontptr:
 
 
 //==================================================================
-// cycle_band_colors — drift the band's per-cell fg colour each frame
-// for the "impossible hues" shimmer.
+// cycle_band_colors — rainbow drift on all NROWS band rows.
 //==================================================================
 cycle_band_colors:
         ldx #39
@@ -261,11 +235,13 @@ cycle_band_colors:
         and #$0f
         tay
         lda rainbow, y
-        asl                        // colour -> hi nibble (fg)
         asl
         asl
         asl
-        sta SCREEN_ROW, x
+        asl
+        .for (var r=0; r<NROWS; r++) {
+            sta SCREEN + (BAND_TOP+r)*40, x
+        }
         dex
         bpl !cy-
         rts
@@ -279,18 +255,17 @@ smooth:   .byte 0
 fwd_idx:  .byte 0
 bwd_idx:  .byte MSGLEN-1
 
-pending_row: .fill 8, 0
-pending_odd: .fill 8, 0
+pending_row: .fill NROWS*8, 0
+pending_odd: .fill NROWS*8, 0
 
 rainbow:
         .byte $06, $0b, $04, $0e, $03, $05, $0d, $07
         .byte $01, $07, $0d, $05, $03, $0e, $04, $0b
 
-// fwd walks forward from char 0, bwd backward from the last char; they
-// meet at the MIDDLE char -> put the readable punchline there.
-message:
-        .text "SPLITTER  DEFEEST   "           // 0..19
-        .text "WALL OF TEXT MEETS  "           // 20..39
-        .text "SEE YOU AT EVOKE    "           // 40..59   (middle ~= meet)
-        .text "KLOTEN MET DE BROOD "           // 60..79
-msg_end:                                       // MSGLEN = 80 (const, top)
+// NROWS wall lines, MSGLEN chars each. The meet (fwd==bwd, middle char)
+// reads true — keep the middle ~20 chars a readable phrase per line.
+walltext:
+        .text "  SPLITTER OVER THE WHOLE SCREEN NOW    DEFEEST  "
+        .text "  THE WALL SHEARS INTO A ZIG ZAG AND BACK       "
+        .text "  EVEN ROWS LEFT  ODD ROWS RIGHT  THEY MEET     "
+        .text "  KLOTEN MET DE BROODTROMMEL   SEE YOU AT EVOKE "
