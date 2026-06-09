@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.34  "multi-line story roll: each banner cycles readable lines"
+// splitter — v0.35  "tunable tempo-beat: swim lurch + rainbow surge on the beat"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -84,6 +84,10 @@
                                    //   ~3.6px = each glyph torn top-vs-bottom = the mush we saw.
 .const ROWOFF   = $20              // phase offset between hero rows (they swim out of phase)
 .const SWIMSPD  = 2                // master phase advance / frame = travel speed
+// --- Beat (tunable tempo, since the SID isn't register-readable here):
+.const BEAT_FRAMES = 24            // frames per beat — TUNE BY EAR to lock to the music
+.const BEAT_KICK   = $18           // swim-phase lurch on each beat (wave pulse)
+.const BEAT_HUE    = $02           // rainbow hue surge on each beat
 // --- The Split (the demo's heart): a line breaks into two halves that
 //     slide out the side borders and converge back to one readable line.
 //     Left half = cols 0..19, right half = cols 20..39, both carrying the
@@ -276,6 +280,21 @@ irq_work:
         // frame and stay tiny. Coloured debug bands graph the cost.
         dbg($02)                   // RED = SID player
         jsr music.play
+        // Beat: SID registers aren't readable in this setup, so drive a pulse
+        // off a TUNABLE tempo (BEAT_FRAMES frames/beat — tune by ear to lock).
+        dec beatctr
+        bne !nobeat+
+        lda #BEAT_FRAMES
+        sta beatctr
+        lda #BEAT_KICK             // a beat! lurch the swim wave forward
+        clc
+        adc swimphase
+        sta swimphase
+        lda #BEAT_HUE              // and surge the rainbow hue
+        clc
+        adc beathue
+        sta beathue
+!nobeat:
         dbg($07)                   // YELLOW = phase machine
         jsr update_phase
         inc frame
@@ -514,9 +533,11 @@ color_cycle:
         sta cptr
         lda col_hi,x
         sta cptr+1
-        lda frame                  // hue base = (frame>>2) + row*3
+        lda frame                  // hue base = (frame>>2) + row*3 + beathue
         lsr
         lsr
+        clc
+        adc beathue                //   the beat surges the colours forward
         sta tmp
         lda linecnt
         asl
@@ -1079,6 +1100,8 @@ glyph_ptr:
 phase:        .byte 0
 phase_timer:  .byte 0
 frame:        .byte 0
+beatctr:      .byte 1                  // counts down to the next beat
+beathue:      .byte 0                  // rainbow hue surge accumulated on beats
 amp:          .byte 0
 ev:           .byte 0
 od:           .byte 0
