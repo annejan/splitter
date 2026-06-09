@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.16  "cycle fix: never render banner + rainbow in the same frame"
+// splitter — v0.17  "badline-safe rasterbars: flowing colour, crisp edges, no speckle"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -251,7 +251,11 @@ irq_work:
         dbg($07)                   // YELLOW = phase machine
         jsr update_phase
         inc frame
-        inc barscroll              // flowing rasterbar wash drifts down
+        lda frame                  // flowing rasterbar drifts (every 2 frames)
+        and #$01
+        bne !nobar+
+        inc barscroll
+!nobar:
         dbg($04)                   // PURPLE = shear table (swim rows)
         jsr build_shear
         dbg($0e)                   // LT-BLUE = split state machine
@@ -296,11 +300,15 @@ irq_shear:
         ldy #TOP
 !sl:    lda shear_tab,y            // per-scanline $d016 shear (the swim)
         sta $d016
-        tya                        // + a flowing rasterbar behind the poem
-        clc
-        adc barscroll
+        tya                        // flowing rasterbar — but indexed by (y>>3),
+        lsr                        // so bar EDGES sit on fixed 8-line grid
+        lsr                        // (y==0 mod8) while BADLINES are at y==3 mod8:
+        lsr                        // edges never land on a badline, so a late
+        clc                        // badline write falls mid-bar (same colour) =
+        adc barscroll              // no speckle. Colours still flow via barscroll.
+        and #$07
         tax
-        lda bargrad,x
+        lda barpal8,x
         sta $d021
         iny
 !w:     cpy $d012
@@ -1019,10 +1027,9 @@ wave_sine: .fill 256, D016BASE + round(3 * sin(toRadians(i * 360 * 4 / 256)))
 .align 256
 shear_tab: .fill 256, D016BASE
 
-// flowing rasterbar gradient: 8-scanline bars (black/blue/dk-grey/med-grey),
-// dark enough to keep the poem readable. Indexed by (rasterline+barscroll).
-.var barpal = List().add($00, $06, $0b, $0c, $0b, $06, $00, $00)
-bargrad: .fill 256, barpal.get((i>>3) & 7)
+// flowing rasterbar palette: 8 dark blue/grey colours (readable behind text),
+// rotated by barscroll. Bar EDGES sit on the 8-line grid (badline-safe).
+barpal8: .byte $00, $06, $0b, $0c, $0b, $06, $00, $00
 
 // the clean readable banner line, pre-rendered in CANVAS byte order
 bsrc: .fill 320, 0
