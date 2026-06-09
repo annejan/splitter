@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.13  "venetian split-scroll banner: even/odd halves meet + wait, rainbow"
+// splitter — v0.14  "banner oscillates: diverge<->converge to the meet, connected flow"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -94,9 +94,10 @@
 .const C1CODE     = 64             // banner 1 uses canvas char codes 64..103
 .const CANVAS1    = FONT_RAM + C1CODE*8   // $3200 — the 40-char scratch canvas
 .const BANNER1ROW = 16             // a free row (not in rowList) for the banner
-.const BSTEP      = 8              // frames per char-step (1 pixel-col / frame)
-.const SCROLLFR   = 180            // frames of venetian scroll between meets (~3.6s)
-.const BPAUSE     = 120            // frames to hold the aligned readable line (~2.4s)
+.const SMAX       = 40             // max shear (chars) — fully apart = blank, then back
+.const BSTEP2     = 3              // frames per 1-char shear step (40*3 ~ 2.4s each way)
+.const BPAUSE     = 120            // frames to hold the readable line at the meet (~2.4s)
+.const osrc       = $f9            // zp pair (= cptr) reused as odd-row source ptr
 .const DEBUG    = 1                // 1 = colour-band raster profiler in the border
 .const INTRO    = 0                // 1 = run DEFEEST screenfill bloom (WIP: hangs $c07d)
 
@@ -678,20 +679,16 @@ init_banner:
         cpx #40
         bne !bc-
 
-        // render the clean readable line into bsrc, and start the canvas on it
+        // pre-render the clean line into bsrc, start at the meet (s=0) holding
         jsr build_bsrc
-        jsr blit_readable
-
-        // seed scroll state: even ptr at msg start (forward), odd at end (back)
         lda #0
-        sta msg_e
-        sta bsmooth
-        sta b_sframes
-        sta b_pause
-        lda #MSGLEN-1
-        sta msg_o
-        jsr load_pending_even
-        jsr load_pending_odd
+        sta bs_s
+        sta bs_sub                 // HOLD (readable)
+        lda #1
+        sta bs_dir
+        lda #BPAUSE
+        sta bs_tmr
+        jsr render_banner          // draw the readable line into the canvas
         rts
 
 //==================================================================
@@ -723,83 +720,163 @@ build_bsrc:
         rts
 
 //==================================================================
-// blit_readable — copy the clean line (bsrc) straight into the canvas, so
-// the meet pause shows perfectly aligned text (never scheef). 320 bytes.
+// render_banner — rebuild the canvas from bsrc (cell-order: bsrc[cell*8+r])
+// at shear bs_s. EVEN pixel-rows shifted right by s (so they enter from the
+// right as s shrinks), ODD pixel-rows shifted left by s (enter from the
+// left). s=0 -> the clean readable line. Incremental pointers, no per-cell
+// multiply. ~5k cy, only runs on a shear step.
+//   canvas cell c: even rows <- bsrc[c-s] (valid c>=s), odd <- bsrc[c+s]
+//   (valid c+s<40), else space.
 //==================================================================
-blit_readable:
-        ldx #0
-!b1:    lda bsrc,x
-        sta CANVAS1,x
-        inx
-        bne !b1-
-        ldx #0
-!b2:    lda bsrc+$100,x
-        sta CANVAS1+$100,x
-        inx
-        cpx #(320-256)
-        bne !b2-
+render_banner:
+        lda #<CANVAS1
+        sta dstptr
+        lda #>CANVAS1
+        sta dstptr+1
+        lda #<bsrc                 // esrc starts at bsrc (first used at c==s)
+        sta srcptr
+        lda #>bsrc
+        sta srcptr+1
+        lda bs_s                   // osrc = bsrc + s*8
+        asl
+        asl
+        asl
+        clc
+        adc #<bsrc
+        sta osrc
+        lda bs_s
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        adc #>bsrc
+        sta osrc+1
+        ldx #0                     // X = canvas cell 0..39
+!cell:
+        // --- even rows (0,2,4,6): valid when c >= s ---
+        cpx bs_s
+        bcc !eblank+
+        ldy #0
+        lda (srcptr),y
+        sta (dstptr),y
+        ldy #2
+        lda (srcptr),y
+        sta (dstptr),y
+        ldy #4
+        lda (srcptr),y
+        sta (dstptr),y
+        ldy #6
+        lda (srcptr),y
+        sta (dstptr),y
+        lda srcptr                 // advance esrc only while valid
+        clc
+        adc #8
+        sta srcptr
+        bcc !ev+
+        inc srcptr+1
+!ev:    jmp !edone+
+!eblank:
+        lda #0
+        ldy #0
+        sta (dstptr),y
+        ldy #2
+        sta (dstptr),y
+        ldy #4
+        sta (dstptr),y
+        ldy #6
+        sta (dstptr),y
+!edone:
+        // --- odd rows (1,3,5,7): valid when c + s < 40 ---
+        txa
+        clc
+        adc bs_s
+        cmp #40
+        bcs !oblank+
+        ldy #1
+        lda (osrc),y
+        sta (dstptr),y
+        ldy #3
+        lda (osrc),y
+        sta (dstptr),y
+        ldy #5
+        lda (osrc),y
+        sta (dstptr),y
+        ldy #7
+        lda (osrc),y
+        sta (dstptr),y
+        lda osrc
+        clc
+        adc #8
+        sta osrc
+        bcc !ov+
+        inc osrc+1
+!ov:    jmp !odone+
+!oblank:
+        lda #0
+        ldy #1
+        sta (dstptr),y
+        ldy #3
+        sta (dstptr),y
+        ldy #5
+        sta (dstptr),y
+        ldy #7
+        sta (dstptr),y
+!odone:
+        lda dstptr                 // cdst += 8 (next cell)
+        clc
+        adc #8
+        sta dstptr
+        bcc !cc+
+        inc dstptr+1
+!cc:    inx
+        cpx #40
+        beq !rbdone+
+        jmp !cell-
+!rbdone:
         rts
 
 //==================================================================
-// banner_scroll — one frame of the venetian split: even pixel-rows ROL
-// forward (from pending_even), odd pixel-rows ROR backward (from
-// pending_odd). Every BSTEP frames advance a char: even ptr forward,
-// odd ptr backward, reload pending. The two halves cross -> readable.
+// banner_scroll — oscillate the shear: hold readable (s=0), diverge to
+// SMAX (the two halves slide out both sides), converge back to 0, hold,
+// repeat. The meet is REACHED by motion (no snap), in a connected flow.
 //==================================================================
 banner_scroll:
-        lda b_pause                // frozen at a meet? hold the readable line
-        beq !run+
-        dec b_pause
-        rts
-!run:   ldx #0                     // X = pixel row 0..7
-!rl:    txa
-        and #$01
-        bne !odd+
-        // even row: ROL chain shifts content LEFT, new bit enters cell 39
-        asl pending_even,x
-        .for (var c = 39; c >= 0; c--) {
-            rol CANVAS1 + c*8, x
-        }
-        jmp !nx+
-!odd:   // odd row: ROR chain shifts content RIGHT, new bit enters cell 0
-        lsr pending_odd,x
-        .for (var c = 0; c <= 39; c++) {
-            ror CANVAS1 + c*8, x
-        }
-!nx:    inx
-        cpx #8
-        beq !adv+
-        jmp !rl-
-!adv:   inc bsmooth                // char-step every BSTEP frames
-        lda bsmooth
-        cmp #BSTEP
-        bne !timer+
-        lda #0
-        sta bsmooth
-        inc msg_e                  // even stream walks forward
-        lda msg_e
-        cmp #MSGLEN
-        bne !ef+
-        lda #0
-        sta msg_e
-!ef:    jsr load_pending_even
-        ldx msg_o                  // odd stream walks backward
-        bne !od+
-        ldx #MSGLEN
-!od:    dex
-        stx msg_o
-        jsr load_pending_odd
-!timer: // after SCROLLFR frames of venetian, snap to the aligned readable
-        // line (guaranteed straight, not scheef) and hold for BPAUSE frames
-        inc b_sframes
-        lda b_sframes
-        cmp #SCROLLFR
+        lda bs_sub
+        bne !move+
+        // HOLD at the meet (s=0, readable)
+        dec bs_tmr
         bne !done+
-        lda #0
-        sta b_sframes
-        jsr blit_readable          // canvas <- the clean 40-char line
+        lda #1
+        sta bs_sub                 // -> MOVE, start diverging
+        lda #1
+        sta bs_dir
+        lda #BSTEP2
+        sta bs_tmr
+        rts
+!move:  dec bs_tmr
+        bne !done+
+        lda #BSTEP2
+        sta bs_tmr
+        lda bs_s
+        clc
+        adc bs_dir                 // +1 diverge / +$ff converge
+        sta bs_s
+        cmp #SMAX+1
+        bcc !chk0+
+        lda #SMAX                  // hit the edge -> converge
+        sta bs_s
+        lda #$ff
+        sta bs_dir
+        jmp !render+
+!chk0:  lda bs_s
+        bne !render+
+        lda #0                     // back at the meet -> hold readable
+        sta bs_sub
         lda #BPAUSE
-        sta b_pause
+        sta bs_tmr
+!render:
+        jsr render_banner
 !done:  rts
 
 // banner_color — drift a 16-hue rainbow across the banner row every frame
@@ -824,28 +901,6 @@ banner_color:
         bne !bc-
         rts
 
-// load_pending_even/odd — fetch the 8 glyph bytes of msg[ptr] from the RAM
-// font into pending_even/odd (the bytes that scroll in over BSTEP frames).
-load_pending_even:
-        ldx msg_e
-        lda msg,x
-        jsr glyph_ptr
-        ldy #7
-!f:     lda ($02),y
-        sta pending_even,y
-        dey
-        bpl !f-
-        rts
-load_pending_odd:
-        ldx msg_o
-        lda msg,x
-        jsr glyph_ptr
-        ldy #7
-!f:     lda ($02),y
-        sta pending_odd,y
-        dey
-        bpl !f-
-        rts
 // glyph_ptr — A = char code -> $02/$03 = FONT_RAM + A*8
 glyph_ptr:
         pha
@@ -889,15 +944,12 @@ stmr:  .fill NLINES, 1 + i*22          // staggered start so meets don't sync
 sflash:.fill NLINES, 0                 // white-flash countdown after a meet
 
 // banner venetian split-scroll state
-msg_e:        .byte 0                  // even-stream char index (walks forward)
-msg_o:        .byte 0                  // odd-stream char index (walks backward)
-bsmooth:      .byte 0                  // 0..BSTEP-1 pixel-column counter
-b_pause:      .byte 0                  // >0 = holding the aligned readable line
-b_sframes:    .byte 0                  // venetian-scroll frame counter -> next meet
+bs_s:         .byte 0                  // current shear amount (0=meet .. SMAX=apart)
+bs_sub:       .byte 0                  // 0 = HOLD at meet, 1 = MOVE
+bs_dir:       .byte 1                  // +1 diverge / $ff converge
+bs_tmr:       .byte 0                  // sub-phase timer
 bhue:         .byte 0                  // rainbow drift phase for the banner row
-pending_even: .fill 8, 0               // 8 glyph bytes scrolling in (even rows)
-pending_odd:  .fill 8, 0               // 8 glyph bytes scrolling in (odd rows)
-msg:          .text bmsg               // the scroll message (screencode_upper)
+msg:          .text bmsg               // the banner line (screencode_upper)
 
 line_start:   .fill NLINES, startList.get(i)
 line_exit:    .fill NLINES, 80 - startList.get(i)
@@ -908,7 +960,9 @@ line_color:   .fill NLINES, colList.get(i)
 // split is now the venetian banner (row 16); keep one swim line for variety.
 role:         .byte 0, 0, 0, 0, R_SWIM, 0, 0, 0, 0, 0
 // first raster line of each poetry row (display top 51 + row*8)
-line_scan:    .fill NLINES, 51 + rowList.get(i)*8
+line_scan:    .fill NLINES, 50 + rowList.get(i)*8   // 50 (not 51): the shear value
+                                   // written during a line affects THAT line, so place
+                                   // the band one raster up or the top pixel-row lags
 // all 16 C64 colours in a hue-ish order, for the drifting rainbow
 rainbow16:
         .byte $01, $07, $08, $0a, $02, $04, $06, $0e
