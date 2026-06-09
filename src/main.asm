@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.22  "bars off (the speckle source) -> clean black bg; swim back on"
+// splitter — v0.23  "banner: long readable hold dominates, brief gentle half-split"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -94,9 +94,10 @@
 .const C1CODE     = 64             // banner 1 uses canvas char codes 64..103
 .const CANVAS1    = FONT_RAM + C1CODE*8   // $3200 — the 40-char scratch canvas
 .const BANNER1ROW = 16             // a free row (not in rowList) for the banner
-.const SMAX       = 40             // max shear (chars) — fully apart = blank, then back
-.const BSTEP2     = 3              // frames per 1-char shear step (40*3 ~ 2.4s each way)
-.const BPAUSE     = 120            // frames to hold the readable line at the meet (~2.4s)
+.const SMAX       = 22             // max shear (chars) — half-split (never fully blank)
+.const BSTEP2     = 2              // frames per 1-char shear step (22*2 ~ 0.9s each way)
+.const BPAUSE     = 220            // hold the readable line LONG (~4.4s) so it dominates
+                                   //   the brief split flourish (was apart 2/3 of the time)
 .const osrc       = $f9            // zp pair (= cptr) reused as odd-row source ptr
 .const DEBUG    = 1                // 1 = colour-band raster profiler in the border
 .const BARS     = 0                // 1 = flowing $d021 rasterbars (needs a stable raster
