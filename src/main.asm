@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.33  "fast split banner on top, slow one below (2:1 weighted stream)"
+// splitter — v0.34  "multi-line story roll: each banner cycles readable lines"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -25,11 +25,25 @@
 .var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
 .var speedList = List().add(2, 3, 1, 2, 3, 1, 2, 3, 2, 1)
 
-// Banner lines — EXACTLY 40 chars each so the meet snaps to a clean row.
-.var bmsg   = "    SPLITTER  -  FRISSER  DAN  OOIT     "
-.const MSGLEN = bmsg.size()   // = 40
-.var bmsg2  = "   DEFEEST GROET DE SCENE BIJ EVOKE !   "
-.const MSGLEN2 = bmsg2.size() // = 40
+// Each banner rolls a LIST of lines (<=40 chars, padded to 40). On every meet
+// the next line scrolls in -> a real story / greetings roll. Banner 1 (bottom)
+// tells the demo's story; banner 2 (top) does the greetings.
+.const MSGLEN  = 40
+.const MSGLEN2 = 40
+.var lines1 = List()
+.eval lines1.add("  SPLITTER  -  A DEFEEST PRODUCTION")
+.eval lines1.add("  TEXT TORN ON EVEN AND ODD LINES")
+.eval lines1.add("  SCROLLING IN FROM LEFT AND RIGHT")
+.eval lines1.add("  AND MEETING CLEAN IN THE MIDDLE")
+.eval lines1.add("  ONE IDEA EXECUTED AT FIFTY HERTZ")
+.var lines2 = List()
+.eval lines2.add("  GREETINGS TO EVERYONE AT EVOKE !")
+.eval lines2.add("  AND TO ALL C64 SCENERS OUT THERE")
+.eval lines2.add("  DESIRE  BOOZE  CENSOR  GENESIS")
+.eval lines2.add("  KLOOT WAS HERE - FRIET MET ALLES")
+.eval lines2.add("  SEE YOU AT THE SNACKBAR - CINDER")
+.const NL1 = lines1.size()
+.const NL2 = lines2.size()
 
 * = $0801
         .byte $0c, $08, $0a, $00, $9e, $32, $30, $36, $34, $00, $00, $00
@@ -853,13 +867,19 @@ init_banner:
 // Banner engine — both banners share these two macros.
 //==================================================================
 // BUILD_BSRC — render a 40-char line MSGB into BSRCB (CANVAS byte order).
-.macro BUILD_BSRC(BSRCB, MSGB) {
+.macro BUILD_BSRC(BSRCB, PTRLO, PTRHI, LINEIDX) {
+        ldx LINEIDX                // srcptr = line PTRLO/HI[LINEIDX]
+        lda PTRLO,x
+        sta srcptr
+        lda PTRHI,x
+        sta srcptr+1
         lda #<BSRCB
         sta cptr
         lda #>BSRCB
         sta cptr+1
-        ldx #0
-!bc:    lda MSGB,x
+        ldy #0                     // Y = char column 0..39
+!bc:    lda (srcptr),y
+        sty tmp                    // save col (inner loop reuses Y)
         jsr glyph_ptr
         ldy #7
 !br:    lda ($02),y
@@ -872,15 +892,16 @@ init_banner:
         sta cptr
         bcc !nc+
         inc cptr+1
-!nc:    inx
-        cpx #40
+!nc:    ldy tmp
+        iny
+        cpy #40
         bne !bc-
 }
 
 // BANNER_FRAME — one frame of 1px ROL/ROR venetian streaming for a banner
 // (even rows ROL left, odd rows ROR right). At a column boundary advance and
 // reload pending from BSRCB; after a full MLEN cycle snap clean + HOLD PAUSE.
-.macro BANNER_FRAME(CANVAS, MLEN, BSRCB, PAUSE, sub, tmr, col, smth, pe, po) {
+.macro BANNER_FRAME(CANVAS, MLEN, BSRCB, PAUSE, sub, tmr, col, smth, pe, po, LINEIDX, NLINESB, REBUILD) {
         lda sub
         bne !mv+
         dec tmr                    // HOLD the readable meet
@@ -926,6 +947,22 @@ init_banner:
         inx
         cpx #(MLEN*8-256)
         bne !bl2-
+        // canvas now shows the current line at its meet. Advance to the NEXT
+        // line, rebuild BSRCB from it + reseed pending, so the next scroll
+        // brings the next story line in.
+        inc LINEIDX
+        lda LINEIDX
+        cmp #NLINESB
+        bcc !li+
+        lda #0
+        sta LINEIDX
+!li:    jsr REBUILD
+        ldy #7
+!rs:    lda BSRCB,y
+        sta pe,y
+        sta po,y
+        dey
+        bpl !rs-
         lda #0
         sta sub
         lda #PAUSE
@@ -961,20 +998,20 @@ init_banner:
 * = $2000 "Banner+"
 
 build_bsrc:
-        BUILD_BSRC(bsrc, msg)
+        BUILD_BSRC(bsrc, ln1lo, ln1hi, lineidx1)
         rts
 build_bsrc2:
-        BUILD_BSRC(bsrc2, msg2)
+        BUILD_BSRC(bsrc2, ln2lo, ln2hi, lineidx2)
         rts
 
 //==================================================================
 // banner_scroll / banner_scroll2 — one 1px streaming frame each (macro).
 //==================================================================
 banner_scroll:
-        BANNER_FRAME(CANVAS1, MSGLEN, bsrc, BPAUSE, bs_sub, bs_tmr, bcol, bsmooth, pending_even, pending_odd)
+        BANNER_FRAME(CANVAS1, MSGLEN, bsrc, BPAUSE, bs_sub, bs_tmr, bcol, bsmooth, pending_even, pending_odd, lineidx1, NL1, build_bsrc)
         rts
 banner_scroll2:
-        BANNER_FRAME(CANVAS2, MSGLEN2, bsrc2, BPAUSE2, bs_sub2, bs_tmr2, bcol2, bsmooth2, pending_even2, pending_odd2)
+        BANNER_FRAME(CANVAS2, MSGLEN2, bsrc2, BPAUSE2, bs_sub2, bs_tmr2, bcol2, bsmooth2, pending_even2, pending_odd2, lineidx2, NL2, build_bsrc2)
         rts
 
 // banner_color — drift a 16-hue rainbow across the banner row every frame
@@ -1077,8 +1114,23 @@ bhue:         .byte 0                  // rainbow drift phase for the banner row
 barscroll:    .byte 0                  // flowing-rasterbar scroll offset
 colrow:       .fill 40, 0              // one computed rainbow row, copied to all swim rows
 b_did_render: .byte 0                  // 1 = banner rebuilt the canvas this frame (unused now)
-msg:          .text bmsg               // banner 1 line (screencode_upper)
-msg2:         .text bmsg2              // banner 2 line
+// each line padded to 40 chars (screencode_upper); pointer tables index them
+lines1data:
+.for (var i = 0; i < NL1; i++) {
+        .text lines1.get(i)
+        .fill 40 - lines1.get(i).size(), $20
+}
+lines2data:
+.for (var i = 0; i < NL2; i++) {
+        .text lines2.get(i)
+        .fill 40 - lines2.get(i).size(), $20
+}
+ln1lo: .fill NL1, <(lines1data + i*40)
+ln1hi: .fill NL1, >(lines1data + i*40)
+ln2lo: .fill NL2, <(lines2data + i*40)
+ln2hi: .fill NL2, >(lines2data + i*40)
+lineidx1:     .byte 0
+lineidx2:     .byte 0
 
 line_start:   .fill NLINES, startList.get(i)
 line_exit:    .fill NLINES, 80 - startList.get(i)
