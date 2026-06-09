@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.24  "full-width split sweep (SMAX = full 40 cols, not a short fixed reach)"
+// splitter — v0.25  "banner: continuous wrap-scroll — nothing disappears, symmetric, full-width"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -817,14 +817,31 @@ render_even:
         sta dstptr
         lda #>CANVAS1
         sta dstptr+1
-        lda #<bsrc                 // esrc starts at bsrc (first used at c==s)
+        // esrc = bsrc + ((40 - s) mod 40)*8   even rows scroll RIGHT by s, WRAP
+        lda #40
+        sec
+        sbc bs_s
+        cmp #40
+        bcc !ei+
+        lda #0
+!ei:    sta tmp
+        asl
+        asl
+        asl
+        clc
+        adc #<bsrc
         sta srcptr
-        lda #>bsrc
+        lda tmp
+        lsr
+        lsr
+        lsr
+        lsr
+        lsr
+        clc
+        adc #>bsrc
         sta srcptr+1
         ldx #0
-!cell:  cpx bs_s                   // even valid when c >= s
-        bcc !blank+
-        ldy #0
+!cell:  ldy #0
         lda (srcptr),y
         sta (dstptr),y
         ldy #2
@@ -836,22 +853,25 @@ render_even:
         ldy #6
         lda (srcptr),y
         sta (dstptr),y
-        lda srcptr
+        lda srcptr                 // esrc += 8, wrap at bsrc+320
         clc
         adc #8
         sta srcptr
-        bcc !adv+
+        bcc !ew+
         inc srcptr+1
-        jmp !adv+
-!blank: lda #0
-        ldy #0
-        sta (dstptr),y
-        ldy #2
-        sta (dstptr),y
-        ldy #4
-        sta (dstptr),y
-        ldy #6
-        sta (dstptr),y
+!ew:    lda srcptr+1
+        cmp #>(bsrc+320)
+        bne !adv+
+        lda srcptr
+        cmp #<(bsrc+320)
+        bcc !adv+
+        lda srcptr
+        sec
+        sbc #<320
+        sta srcptr
+        lda srcptr+1
+        sbc #>320
+        sta srcptr+1
 !adv:   lda dstptr
         clc
         adc #8
@@ -871,28 +891,26 @@ render_odd:
         sta dstptr
         lda #>CANVAS1
         sta dstptr+1
+        // osrc = bsrc + (s mod 40)*8   odd rows scroll LEFT by s, WRAP
         lda bs_s
+        sta tmp
         asl
         asl
         asl
         clc
         adc #<bsrc
         sta srcptr
-        lda bs_s
+        lda tmp
         lsr
         lsr
         lsr
         lsr
         lsr
+        clc
         adc #>bsrc
         sta srcptr+1
         ldx #0
-!cell:  txa
-        clc
-        adc bs_s
-        cmp #40
-        bcs !blank+
-        ldy #1
+!cell:  ldy #1
         lda (srcptr),y
         sta (dstptr),y
         ldy #3
@@ -904,22 +922,25 @@ render_odd:
         ldy #7
         lda (srcptr),y
         sta (dstptr),y
-        lda srcptr
+        lda srcptr                 // osrc += 8, wrap at bsrc+320
         clc
         adc #8
         sta srcptr
-        bcc !adv+
+        bcc !ow+
         inc srcptr+1
-        jmp !adv+
-!blank: lda #0
-        ldy #1
-        sta (dstptr),y
-        ldy #3
-        sta (dstptr),y
-        ldy #5
-        sta (dstptr),y
-        ldy #7
-        sta (dstptr),y
+!ow:    lda srcptr+1
+        cmp #>(bsrc+320)
+        bne !adv+
+        lda srcptr
+        cmp #<(bsrc+320)
+        bcc !adv+
+        lda srcptr
+        sec
+        sbc #<320
+        sta srcptr
+        lda srcptr+1
+        sbc #>320
+        sta srcptr+1
 !adv:   lda dstptr
         clc
         adc #8
@@ -957,9 +978,7 @@ banner_scroll:
         dec bs_tmr
         bne !done+
         lda #1
-        sta bs_sub                 // -> MOVE, start diverging
-        lda #1
-        sta bs_dir
+        sta bs_sub                 // -> MOVE (continuous wrap-scroll)
         lda #BSTEP2
         sta bs_tmr
         rts
@@ -967,20 +986,15 @@ banner_scroll:
         bne !done+
         lda #BSTEP2
         sta bs_tmr
+        // CONTINUOUS scroll: even rows scroll right, odd left, content WRAPS
+        // (nothing disappears — what leaves one edge re-enters the other).
+        // One full cycle (s 0->39) then home -> hold the readable meet.
+        inc bs_s
         lda bs_s
-        clc
-        adc bs_dir                 // +1 diverge / +$ff converge
+        cmp #40
+        bcc !render+
+        lda #0                     // wrapped home -> readable -> hold
         sta bs_s
-        cmp #SMAX+1
-        bcc !chk0+
-        lda #SMAX                  // hit the edge -> converge
-        sta bs_s
-        lda #$ff
-        sta bs_dir
-        jmp !render+
-!chk0:  lda bs_s
-        bne !render+
-        lda #0                     // back at the meet -> hold readable
         sta bs_sub
         lda #BPAUSE
         sta bs_tmr
