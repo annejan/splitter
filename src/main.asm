@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.23  "banner: long readable hold dominates, brief gentle half-split"
+// splitter — v0.24  "full-width split sweep (SMAX = full 40 cols, not a short fixed reach)"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -94,10 +94,12 @@
 .const C1CODE     = 64             // banner 1 uses canvas char codes 64..103
 .const CANVAS1    = FONT_RAM + C1CODE*8   // $3200 — the 40-char scratch canvas
 .const BANNER1ROW = 16             // a free row (not in rowList) for the banner
-.const SMAX       = 22             // max shear (chars) — half-split (never fully blank)
-.const BSTEP2     = 2              // frames per 1-char shear step (22*2 ~ 0.9s each way)
-.const BPAUSE     = 220            // hold the readable line LONG (~4.4s) so it dominates
-                                   //   the brief split flourish (was apart 2/3 of the time)
+.const SMAX       = 40             // FULL line width: the halves slide the whole 40 cols
+                                   //   (fully off + back) so the sweep covers the entire
+                                   //   line — not a fixed shorter reach that left part of
+                                   //   the row half-done. 40*2 ~ 1.6s each way.
+.const BSTEP2     = 2              // frames per 1-char shear step
+.const BPAUSE     = 220            // long readable hold (~4.4s) so the meet still dominates
 .const osrc       = $f9            // zp pair (= cptr) reused as odd-row source ptr
 .const DEBUG    = 1                // 1 = colour-band raster profiler in the border
 .const BARS     = 0                // 1 = flowing $d021 rasterbars (needs a stable raster
