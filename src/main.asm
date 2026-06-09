@@ -1,103 +1,129 @@
 //==================================================================
-// splitter — v0.1  "the wall splits and meets again"
+// splitter — v0.2  "per-pixel-row zig-zag split"
 //
-// A char-mode demo seed: two text rows show the SAME message but scan
-// it in OPPOSITE directions, so the wall of text drifts apart and then
-// resolves back into one readable line at the meet point — the split /
-// reunion that was the nicest effect in the x2026 intro, isolated here
-// as the thing we build the whole demo around.
+// THE effect: one bitmap scroller, but its 8 pixel rows are split —
+// EVEN pixel rows scroll LEFT, ODD pixel rows scroll RIGHT. A forward
+// text stream feeds the even rows, a backward stream the odd rows, so
+// the wall of text shears into a fine zig-zag and resolves into one
+// readable line when the two streams cross in the middle. (The trick
+// from the x2026 intro, isolated.)
 //
-// Colours drift through a 16-entry rainbow every frame (per-char, both
-// rows) for the "impossible hues" shimmer, with a slow border cycle.
+// Per pixel row x (0..7): a 40-cell ROL chain (left) or ROR chain
+// (right), new bit fed from pending_row[x] / pending_odd[x]. Every 8
+// sub-pixel steps a fresh char is loaded into the pending buffers.
 //
-// Standalone PRG: BASIC stub SYS 2064 -> $0810. Raster-IRQ driven.
-// KERNAL/BASIC banked out ($01=$35); IRQ vector lives in RAM at $FFFE.
+// $d020 is used the classic way: inc at the top of the shifter, dec at
+// the bottom — the border band shows exactly how much raster time the
+// zig-zag eats. Standalone PRG, BASIC stub SYS 2064 -> $0810.
 //==================================================================
 .cpu _6502
-.encoding "screencode_upper"      // A..Z -> $01..$1A, space $20
+.encoding "screencode_upper"
 
-//------------------------------------------------------------------
-// BASIC stub:  10 SYS 2064
-//------------------------------------------------------------------
 * = $0801
         .byte $0c, $08, $0a, $00, $9e, $32, $30, $36, $34, $00, $00, $00
 
-//------------------------------------------------------------------
 * = $0810 "Main"
 
-.const SCREEN  = $0400
-.const COLOR   = $d800
-.const ROW_T   = SCREEN + 11*40    // top scroller  ($05B8)
-.const ROW_B   = SCREEN + 13*40    // bottom scroller ($0608)
-.const CROW_T  = COLOR  + 11*40
-.const CROW_B  = COLOR  + 13*40
+.const SCREEN     = $0400          // bitmap colour RAM (hi nibble = fg)
+.const BITMAP     = $2000
+.const FONT       = $4000          // uppercase CHARGEN copied here
+.const SCROLL_ROW = 12             // char-row of the scroller band
+.const SCROLL_BMP = BITMAP + SCROLL_ROW*320   // $2F00
+.const SCREEN_ROW = SCREEN + SCROLL_ROW*40    // $04E0 (band's colour cells)
 
-.const STEP_FRAMES = 3             // advance the scan every N frames
-
-// zero-page scratch (KERNAL is out, so all of ZP is ours)
-.const srcT = $fb                  // 16-bit src ptr, top row
-.const srcB = $fd                  // 16-bit src ptr, bottom row
+.const fontptr    = $fb            // ZP 16-bit glyph pointer
+.const MSGLEN     = 80             // message length (4 rows x 20 chars)
 
 start:
         sei
         lda #$35
-        sta $01                    // I/O + RAM, no KERNAL/BASIC ROM
+        sta $01
 
-        // VIC: bank 0, screen $0400, uppercase char ROM at $1000
-        lda #$14
-        sta $d018
-        lda #$1b
-        sta $d011                  // text mode, 25 rows, DEN, yscroll 3
+        // --- copy uppercase CHARGEN ($D000 with $01=$33) to FONT ---
+        lda #$33
+        sta $01
+        ldx #0
+!fc:    lda $d000,x
+        sta FONT+$000,x
+        lda $d100,x
+        sta FONT+$100,x
+        lda $d200,x
+        sta FONT+$200,x
+        lda $d300,x
+        sta FONT+$300,x
+        lda $d400,x
+        sta FONT+$400,x
+        lda $d500,x
+        sta FONT+$500,x
+        lda $d600,x
+        sta FONT+$600,x
+        lda $d700,x
+        sta FONT+$700,x
+        inx
+        bne !fc-
+        lda #$35
+        sta $01
+
+        // --- clear bitmap $2000-$3FFF to 0 ---
+        lda #$00
+        ldx #0
+!cb:    .for (var p=0; p<32; p++) {
+            sta BITMAP + p*256, x
+        }
+        inx
+        bne !cb-
+
+        // --- colour RAM: band cells visible (white fg), rest black ---
+        lda #$00
+        ldx #0
+!cs:    sta SCREEN+$000, x
+        sta SCREEN+$100, x
+        sta SCREEN+$200, x
+        sta SCREEN+$2e8, x
+        inx
+        bne !cs-
+        ldx #39
+        lda #$10                   // hi nibble = white fg, lo = black bg
+!cband: sta SCREEN_ROW, x
+        dex
+        bpl !cband-
+
+        // --- VIC: bitmap mode, screen $0400, bitmap $2000 ---
+        lda #$18
+        sta $d018                  // VM=$0400, bitmap base $2000
+        lda #$3b
+        sta $d011                  // BMM + DEN + 25 rows + yscroll 3
         lda #$08
-        sta $d016                  // 40 cols
+        sta $d016                  // hires, 40 cols
         lda #$00
         sta $d020
         sta $d021
 
-        // clear screen -> spaces, colour -> black
-        ldx #0
-        lda #$20
-!cl:    sta SCREEN+$000,x
-        sta SCREEN+$100,x
-        sta SCREEN+$200,x
-        sta SCREEN+$2e8,x
-        inx
-        bne !cl-
-        ldx #0
-        lda #$00
-!cc:    sta COLOR+$000,x
-        sta COLOR+$100,x
-        sta COLOR+$200,x
-        sta COLOR+$2e8,x
-        inx
-        bne !cc-
-
-        // install raster IRQ at line 0
+        // --- raster IRQ ---
         lda #<irq
         sta $fffe
         lda #>irq
         sta $ffff
         lda #$7f
-        sta $dc0d                  // CIA1 timer IRQs off
-        sta $dd0d                  // CIA2 too
-        lda $dc0d                  // ack pending CIA IRQs
+        sta $dc0d
+        sta $dd0d
+        lda $dc0d
         lda $dd0d
         lda #$01
-        sta $d01a                  // enable raster IRQ
+        sta $d01a
         lda #$00
         sta $d012
         lda $d011
         and #$7f
-        sta $d011                  // clear raster MSB
+        sta $d011
         lda #$ff
-        sta $d019                  // ack
+        sta $d019
         cli
-
-!loop:  jmp !loop-                 // everything happens in the IRQ
+!loop:  jmp !loop-
 
 
 //==================================================================
-// raster IRQ — once per frame
+// raster IRQ
 //==================================================================
 irq:
         pha
@@ -106,24 +132,11 @@ irq:
         tya
         pha
         lda #$ff
-        sta $d019                  // ack raster IRQ
+        sta $d019
 
         inc frame
-
-        dec stepctr
-        bne !nostep+
-        lda #STEP_FRAMES
-        sta stepctr
-        jsr advance_split
-!nostep:
-        jsr paint_colors
-
-        lda frame                  // slow border drift
-        lsr
-        lsr
-        lsr
-        and #$0f
-        sta $d020
+        jsr update_scroll
+        jsr cycle_band_colors
 
         pla
         tay
@@ -134,90 +147,150 @@ irq:
 
 
 //==================================================================
+// update_scroll — the zig-zag shifter. Even pixel rows ROL (left),
+// odd ROR (right). $d020 brackets show the raster cost (debug).
+//==================================================================
+update_scroll:
+        inc $d020                  // ## debug: routine start ##
+        ldx #0
+!rowloop:
+        txa
+        and #$01
+        bne !odd+
+        // even pixel row -> shift LEFT, new bit from pending_row[x] bit7
+        asl pending_row, x
+        .for (var i=39; i>=0; i--) {
+            rol SCROLL_BMP + i*8, x
+        }
+        jmp !next+
+!odd:
+        // odd pixel row -> shift RIGHT, new bit from pending_odd[x] bit0
+        lsr pending_odd, x
+        .for (var i=0; i<40; i++) {
+            ror SCROLL_BMP + i*8, x
+        }
+!next:
+        inx
+        cpx #8
+        beq !rldone+
+        jmp !rowloop-
+!rldone:
+        dec $d020                  // ## debug: routine end ##
+
+        // advance sub-pixel; every 8 steps load the next chars
+        inc smooth
+        lda smooth
+        cmp #8
+        bne !done+
+        lda #$00
+        sta smooth
+        jsr load_chars
+!done:
+        rts
+
+
+//==================================================================
+// load_chars — pull the next forward char into pending_row and the
+// next backward char into pending_odd. fwd walks +1, bwd walks -1;
+// they cross in the middle (the "meet" where the zig-zag reads true).
+//==================================================================
+load_chars:
+        ldx fwd_idx
+        lda message, x
+        jsr set_fontptr
+        ldy #7
+!lf:    lda (fontptr), y
+        sta pending_row, y
+        dey
+        bpl !lf-
+        inc fwd_idx
+        lda fwd_idx
+        cmp #MSGLEN
+        bcc !fok+
+        lda #$00
+        sta fwd_idx
+!fok:
+        ldx bwd_idx
+        lda message, x
+        jsr set_fontptr
+        ldy #7
+!lb:    lda (fontptr), y
+        sta pending_odd, y
+        dey
+        bpl !lb-
+        dec bwd_idx
+        bpl !bok+
+        lda #MSGLEN-1
+        sta bwd_idx
+!bok:
+        rts
+
+
+//==================================================================
+// set_fontptr — fontptr = FONT + (A * 8)
+//==================================================================
+set_fontptr:
+        sta fontptr                // A = char (0..255), low for now
+        lda #$00
+        sta fontptr+1
+        asl fontptr
+        rol fontptr+1
+        asl fontptr
+        rol fontptr+1
+        asl fontptr
+        rol fontptr+1              // fontptr = char*8
+        lda fontptr
+        clc
+        adc #<FONT
+        sta fontptr
+        lda fontptr+1
+        adc #>FONT
+        sta fontptr+1
+        rts
+
+
+//==================================================================
+// cycle_band_colors — drift the band's per-cell fg colour each frame
+// for the "impossible hues" shimmer.
+//==================================================================
+cycle_band_colors:
+        ldx #39
+!cy:    txa
+        clc
+        adc frame
+        and #$0f
+        tay
+        lda rainbow, y
+        asl                        // colour -> hi nibble (fg)
+        asl
+        asl
+        asl
+        sta SCREEN_ROW, x
+        dex
+        bpl !cy-
+        rts
+
+
+//==================================================================
 // data
 //==================================================================
 frame:    .byte 0
-stepctr:  .byte STEP_FRAMES
-splitK:   .byte 0
+smooth:   .byte 0
+fwd_idx:  .byte 0
+bwd_idx:  .byte MSGLEN-1
 
-// 16-entry rainbow (C64 palette indices), smooth-ish hue walk.
+pending_row: .fill 8, 0
+pending_odd: .fill 8, 0
+
 rainbow:
         .byte $06, $0b, $04, $0e, $03, $05, $0d, $07
         .byte $01, $07, $0d, $05, $03, $0e, $04, $0b
 
-// The wall of text. Two 40-col windows scan this in opposite
-// directions; tune the wording so the MIDDLE 40 chars (the meet) land
-// a punchline. Keep >= 40 + a healthy scan range of trailing slack.
+// fwd walks forward from char 0, bwd backward from the last char; they
+// meet at the MIDDLE char -> put the readable punchline there.
 message:
-        .text "      SPLITTER      "
-        .text "TWO HALVES OF ONE WALL DRIFT APART      "
-        .text "      AND MEET AGAIN AS A SINGLE LINE      "    // <- the meet
-        .text "DEFEEST WAS HERE   KLOTEN MET DE BROODTROMMEL      "
-        .text "SEE YOU AT EVOKE          "
-msg_end:
-
-.const MSGLEN     = msg_end - message
-.const SCAN_RANGE = MSGLEN - 40        // K walks 0 .. SCAN_RANGE-1
-
-
-//==================================================================
-// advance_split — step the scan, repaint both row windows.
-//   top row shows   message[K .. K+39]            (scrolls left)
-//   bottom row shows message[(RANGE-1-K) .. +39]  (scrolls right)
-// They coincide at K = (RANGE-1)/2 -> the wall meets as one line.
-//==================================================================
-advance_split:
-        inc splitK
-        lda splitK
-        cmp #SCAN_RANGE
-        bcc !ok+
-        lda #0
-        sta splitK
-!ok:
-        // srcT = message + K
-        lda #<message
-        clc
-        adc splitK
-        sta srcT
-        lda #>message
-        adc #0
-        sta srcT+1
-
-        // srcB = message + (RANGE-1 - K)
-        lda #(SCAN_RANGE-1)
-        sec
-        sbc splitK
-        clc
-        adc #<message
-        sta srcB
-        lda #>message
-        adc #0
-        sta srcB+1
-
-        ldy #39
-!cp:    lda (srcT),y
-        sta ROW_T,y
-        lda (srcB),y
-        sta ROW_B,y
-        dey
-        bpl !cp-
-        rts
-
-
-//==================================================================
-// paint_colors — per-char rainbow that drifts a column each frame,
-// same ramp on both rows so the meet reads as one band.
-//==================================================================
-paint_colors:
-        ldy #39
-!pc:    tya
-        clc
-        adc frame
-        and #$0f
-        tax
-        lda rainbow,x
-        sta CROW_T,y
-        sta CROW_B,y
-        dey
-        bpl !pc-
-        rts
+        .text "SPLITTER  DEFEEST   "           // 0..19
+        .text "WALL OF TEXT MEETS  "           // 20..39
+        .text "SEE YOU AT EVOKE    "           // 40..59   (middle ~= meet)
+        .text "KLOTEN MET DE BROOD "           // 60..79
+msg_end:                                       // MSGLEN = 80 (const, top)
