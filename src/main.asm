@@ -20,7 +20,7 @@
 
 .var music = LoadSid("../music/kleuter-dinges.sid")
 
-.var rowList   = List().add(1, 3, 5, 7, 9, 11, 13, 15, 17, 19)
+.var rowList   = List().add(7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
 .var colList   = List().add($0e, $03, $0d, $07, $01, $0f, $0a, $05, $0c, $06)
 .var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
 .var speedList = List().add(2, 3, 1, 2, 3, 1, 2, 3, 2, 1)
@@ -48,9 +48,9 @@
 .const T_HOLD   = 120
 .const T_OUT    = 130
 
-.const TOP      = $3a              // shear band = the poetry rows only (1..19),
-.const BOT      = $d0              //   NOT the whole screen — keeps the budget
-.const WORKLINE = $d8              // irq_work fires below BOT (avoid same-line refire)
+.const TOP      = $6b              // shear band = the packed poetry block (rows
+.const BOT      = $bb              //   7-16). Tight band -> short shear loop ->
+.const WORKLINE = $c0              //   ~70 lines of budget back. irq_work below BOT.
 .const D016BASE = $0c              // 40-col + xscroll 4 (shear centre)
 .const MODE_TIME = 220             // frames per shear mode (0 zigzag/1 wave/2 row)
 
