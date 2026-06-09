@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.29  "banner step every 2 frames (smoother), demo holds 50Hz"
+// splitter — v0.30  "banner = smooth 1px ROL/ROR streaming, 50Hz all the way"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -772,17 +772,16 @@ init_banner:
         cpx #40
         bne !bc-
 
-        // pre-render the clean line into bsrc, start at the meet (s=0) holding
+        // pre-render the clean line into bsrc; start at the meet, holding
         jsr build_bsrc
         lda #0
-        sta bs_s
         sta bs_sub                 // HOLD (readable)
-        lda #1
-        sta bs_dir
+        sta bcol                   // feed starts at column 0
+        sta bsmooth
         lda #BPAUSE
         sta bs_tmr
-        jsr render_even            // draw the full readable line into the canvas
-        jsr render_odd
+        jsr load_pending           // seed the incoming column
+        jsr blit_bsrc              // draw the clean readable line into the canvas
         rts
 
 //==================================================================
@@ -814,98 +813,90 @@ build_bsrc:
         rts
 
 //==================================================================
-// render_banner — rebuild the canvas from bsrc (cell-order: bsrc[cell*8+r])
-// at shear bs_s. EVEN pixel-rows shifted right by s (so they enter from the
-// right as s shrinks), ODD pixel-rows shifted left by s (enter from the
-// left). s=0 -> the clean readable line. Incremental pointers, no per-cell
-// multiply. ~5k cy, only runs on a shear step.
-//   canvas cell c: even rows <- bsrc[c-s] (valid c>=s), odd <- bsrc[c+s]
-//   (valid c+s<40), else space.
+// banner_scroll — SMOOTH 1px venetian split-scroll via per-pixel-row ROL/ROR
+// (the real kloten technique). Each frame: even rows shift LEFT 1px (ROL,
+// fed a bit from pending_even), odd rows shift RIGHT 1px (ROR, fed
+// pending_odd). Every 8 frames a full char-column has entered -> advance
+// bcol and reload pending from bsrc. After a whole MSGLEN cycle the row is
+// back to bsrc (readable) -> snap+HOLD. ~2.4k cy/frame, EVERY frame, so the
+// motion is a buttery 50Hz (no even/odd split, no overrun).
 //==================================================================
-// render_even — rebuild only the EVEN pixel-rows (0,2,4,6) of the canvas,
-// shifted right by s (enter from the right). Half the work -> done one frame,
-// render_odd the next, so the heavy rebuild never lands in a single frame.
-render_even:
-        lda #<CANVAS1
-        sta dstptr
-        lda #>CANVAS1
-        sta dstptr+1
-        // esrc = bsrc + ((40 - s) mod 40)*8   even rows scroll RIGHT by s, WRAP
-        lda #40
-        sec
-        sbc bs_s
-        cmp #40
-        bcc !ei+
+banner_scroll:
         lda #0
-!ei:    sta tmp
-        asl
-        asl
-        asl
-        clc
-        adc #<bsrc
-        sta srcptr
-        lda tmp
-        lsr
-        lsr
-        lsr
-        lsr
-        lsr
-        clc
-        adc #>bsrc
-        sta srcptr+1
-        ldx #0
-!cell:  ldy #0
-        lda (srcptr),y
-        sta (dstptr),y
-        ldy #2
-        lda (srcptr),y
-        sta (dstptr),y
-        ldy #4
-        lda (srcptr),y
-        sta (dstptr),y
-        ldy #6
-        lda (srcptr),y
-        sta (dstptr),y
-        lda srcptr                 // esrc += 8, wrap at bsrc+320
-        clc
-        adc #8
-        sta srcptr
-        bcc !ew+
-        inc srcptr+1
-!ew:    lda srcptr+1
-        cmp #>(bsrc+320)
-        bne !adv+
-        lda srcptr
-        cmp #<(bsrc+320)
-        bcc !adv+
-        lda srcptr
-        sec
-        sbc #<320
-        sta srcptr
-        lda srcptr+1
-        sbc #>320
-        sta srcptr+1
-!adv:   lda dstptr
-        clc
-        adc #8
-        sta dstptr
-        bcc !cc+
-        inc dstptr+1
-!cc:    inx
-        cpx #40
-        beq !done+
-        jmp !cell-
+        sta b_did_render           // default: let irq_work run colour this frame
+        lda bs_sub
+        bne !move+
+        dec bs_tmr                 // HOLD the readable meet
+        beq !holddone+
+        rts
+!holddone:
+        lda #1                     // -> MOVE
+        sta bs_sub
+        rts
+!move:  lda #1                     // streaming this frame -> irq_work skips colour
+        sta b_did_render           //   (the swim rainbow freezes ~0.8s, imperceptible)
+        ldx #0                     // X = pixel row 0..7
+!row:   txa
+        and #$01
+        beq !even+
+        jmp !odd+
+!even:  asl pending_even,x         // even row: ROL left, new bit enters cell 39
+        .for (var c = 39; c >= 0; c--) {
+            rol CANVAS1 + c*8, x
+        }
+        jmp !nx+
+!odd:   lsr pending_odd,x          // odd row: ROR right, new bit enters cell 0
+        .for (var c = 0; c <= 39; c++) {
+            ror CANVAS1 + c*8, x
+        }
+!nx:    inx
+        cpx #8
+        beq !adv+
+        jmp !row-
+!adv:   inc bsmooth                // 8 bits = one full char-column scrolled in
+        lda bsmooth
+        cmp #8
+        bne !done+
+        lda #0
+        sta bsmooth
+        inc bcol
+        lda bcol
+        cmp #MSGLEN
+        bne !ld+
+        lda #0                     // wrapped a full cycle -> home (== bsrc)
+        sta bcol
+        jsr blit_bsrc              // snap exactly clean + hold the readable line
+        lda #0
+        sta bs_sub
+        lda #BPAUSE
+        sta bs_tmr
+        rts
+!ld:    jsr load_pending           // feed the next column into pending_even/odd
 !done:  rts
 
-// render_odd — the ODD pixel-rows (1,3,5,7), shifted left by s (enter from
-// the left). osrc = bsrc + s*8; valid when c + s < 40.
-render_odd:
-        lda #<CANVAS1
-        sta dstptr
-        lda #>CANVAS1
-        sta dstptr+1
-        // osrc = bsrc + (s mod 40)*8   odd rows scroll LEFT by s, WRAP
-        lda bs_s
+//==================================================================
+// blit_bsrc — copy the clean readable line (bsrc) straight into the canvas.
+//==================================================================
+blit_bsrc:
+        ldx #0
+!b1:    lda bsrc,x
+        sta CANVAS1,x
+        inx
+        bne !b1-
+        ldx #0
+!b2:    lda bsrc+$100,x
+        sta CANVAS1+$100,x
+        inx
+        cpx #(320-256)
+        bne !b2-
+        rts
+
+//==================================================================
+// load_pending — load bsrc column `bcol` (8 bytes) into pending_even/odd
+// (both get the same column; the opposite ROL/ROR makes the venetian).
+//==================================================================
+load_pending:
+        lda bcol
         sta tmp
         asl
         asl
@@ -922,100 +913,13 @@ render_odd:
         clc
         adc #>bsrc
         sta srcptr+1
-        ldx #0
-!cell:  ldy #1
-        lda (srcptr),y
-        sta (dstptr),y
-        ldy #3
-        lda (srcptr),y
-        sta (dstptr),y
-        ldy #5
-        lda (srcptr),y
-        sta (dstptr),y
         ldy #7
-        lda (srcptr),y
-        sta (dstptr),y
-        lda srcptr                 // osrc += 8, wrap at bsrc+320
-        clc
-        adc #8
-        sta srcptr
-        bcc !ow+
-        inc srcptr+1
-!ow:    lda srcptr+1
-        cmp #>(bsrc+320)
-        bne !adv+
-        lda srcptr
-        cmp #<(bsrc+320)
-        bcc !adv+
-        lda srcptr
-        sec
-        sbc #<320
-        sta srcptr
-        lda srcptr+1
-        sbc #>320
-        sta srcptr+1
-!adv:   lda dstptr
-        clc
-        adc #8
-        sta dstptr
-        bcc !cc+
-        inc dstptr+1
-!cc:    inx
-        cpx #40
-        beq !done+
-        jmp !cell-
-!done:  rts
+!lp:    lda (srcptr),y
+        sta pending_even,y
+        sta pending_odd,y
+        dey
+        bpl !lp-
         rts
-
-//==================================================================
-// banner_scroll — oscillate the shear: hold readable (s=0), diverge to
-// SMAX (the two halves slide out both sides), converge back to 0, hold,
-// repeat. The meet is REACHED by motion (no snap), in a connected flow.
-//==================================================================
-banner_scroll:
-        lda #0
-        sta b_did_render
-        // Render is SPLIT across two frames (even, then odd) to stay <=3.8k/
-        // frame -> the demo holds 50Hz. With BSTEP2=1 the step lands every 2
-        // frames (25Hz motion) — rendering BOTH halves in one frame is ~7.6k
-        // and overruns (the 27Hz the user saw). Pending odd from last step:
-        lda bs_render
-        beq !nopend+
-        lda #0
-        sta bs_render
-        lda #1
-        sta b_did_render
-        jsr render_odd
-        rts
-!nopend:
-        lda bs_sub
-        bne !move+
-        dec bs_tmr                 // HOLD at the meet (readable)
-        bne !done+
-        lda #1
-        sta bs_sub
-        lda #BSTEP2
-        sta bs_tmr
-        rts
-!move:  dec bs_tmr
-        bne !done+
-        lda #BSTEP2
-        sta bs_tmr
-        inc bs_s                   // continuous wrap-scroll, home -> hold
-        lda bs_s
-        cmp #40
-        bcc !render+
-        lda #0
-        sta bs_s
-        sta bs_sub
-        lda #BPAUSE
-        sta bs_tmr
-!render:
-        lda #1
-        sta b_did_render
-        sta bs_render              // schedule the odd half for the next frame
-        jsr render_even
-!done:  rts
 
 // banner_color — drift a 16-hue rainbow across the banner row every frame
 // (col>>1 de-confettis it; runs even during the meet pause so it never sits
@@ -1081,16 +985,17 @@ ssub:  .fill NLINES, SP_GAP            // sub-phase, start apart
 stmr:  .fill NLINES, 1 + i*22          // staggered start so meets don't sync
 sflash:.fill NLINES, 0                 // white-flash countdown after a meet
 
-// banner venetian split-scroll state
-bs_s:         .byte 0                  // current shear amount (0=meet .. SMAX=apart)
-bs_sub:       .byte 0                  // 0 = HOLD at meet, 1 = MOVE
-bs_dir:       .byte 1                  // +1 diverge / $ff converge
-bs_tmr:       .byte 0                  // sub-phase timer
+// banner venetian split-scroll state (1px ROL/ROR streaming)
+bs_sub:       .byte 0                  // 0 = HOLD at meet, 1 = MOVE (streaming)
+bs_tmr:       .byte 0                  // hold timer
+bcol:         .byte 0                  // bsrc column currently feeding in (0..MSGLEN-1)
+bsmooth:      .byte 0                  // 0..7 bit counter within a char-column
+pending_even: .fill 8, 0               // incoming column bytes for the even (ROL) rows
+pending_odd:  .fill 8, 0               // incoming column bytes for the odd (ROR) rows
 bhue:         .byte 0                  // rainbow drift phase for the banner row
 barscroll:    .byte 0                  // flowing-rasterbar scroll offset
 colrow:       .fill 40, 0              // one computed rainbow row, copied to all swim rows
-b_did_render: .byte 0                  // 1 = banner rebuilt the canvas this frame
-bs_render:    .byte 0                  // 1 = odd-row rebuild pending next frame
+b_did_render: .byte 0                  // 1 = banner rebuilt the canvas this frame (unused now)
 msg:          .text bmsg               // the banner line (screencode_upper)
 
 line_start:   .fill NLINES, startList.get(i)
