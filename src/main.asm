@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.26  "more golfjes: 7 swim rows undulating, rest rows for contrast"
+// splitter — v0.27  "color_cycle compute-once+copy: 7 swim rows back at 50Hz"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -456,10 +456,26 @@ build_d021tab:
 // on the odd frame next to build_shear so it stays inside 50 Hz.
 //==================================================================
 color_cycle:
+        // All swim rows share the same per-column rainbow, so compute the
+        // 40-cell row ONCE, then just copy it into each swim row's colour RAM.
+        // (7 rows recomputed was ~8k cy = over budget -> 25Hz; this is ~5k.)
+        ldx #0
+!mk:    txa
+        lsr                        // col>>1: one hue per 2 chars (de-confetti)
+        clc
+        adc frame
+        and #$07                   // text-safe 8-hue palette (all high-luma)
+        tay
+        lda rbsafe,y
+        sta colrow,x
+        inx
+        cpx #40
+        bne !mk-
+        // copy the row into every swim row's colour RAM
         lda #NLINES-1
         sta linecnt
 !cl:    ldx linecnt
-        lda role,x                 // only SWIM rows rainbow; split/static stay plain
+        lda role,x
         cmp #R_SWIM
         bne !skip+
         lda col_lo,x
@@ -467,13 +483,7 @@ color_cycle:
         lda col_hi,x
         sta cptr+1
         ldy #39
-!cc:    tya
-        lsr                        // col>>1: one hue per 2 chars (de-confetti)
-        clc
-        adc frame
-        and #$07                   // text-safe 8-hue palette (all high-luma) so no
-        tax                        //   char ever goes dark and vanishes into a bar
-        lda rbsafe,x
+!cc:    lda colrow,y
         sta (cptr),y
         dey
         bpl !cc-
@@ -1076,6 +1086,7 @@ bs_dir:       .byte 1                  // +1 diverge / $ff converge
 bs_tmr:       .byte 0                  // sub-phase timer
 bhue:         .byte 0                  // rainbow drift phase for the banner row
 barscroll:    .byte 0                  // flowing-rasterbar scroll offset
+colrow:       .fill 40, 0              // one computed rainbow row, copied to all swim rows
 b_did_render: .byte 0                  // 1 = banner rebuilt the canvas this frame
 bs_render:    .byte 0                  // 1 = odd-row rebuild pending next frame
 msg:          .text bmsg               // the banner line (screencode_upper)
