@@ -20,7 +20,7 @@
 
 .var music = LoadSid("../music/kleuter-dinges.sid")
 
-.var rowList   = List().add(2, 4, 6, 8, 10, 12, 14, 16, 18, 20)
+.var rowList   = List().add(1, 3, 5, 7, 9, 11, 13, 15, 17, 19)
 .var colList   = List().add($0e, $03, $0d, $07, $01, $0f, $0a, $05, $0c, $06)
 .var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
 .var speedList = List().add(2, 3, 1, 2, 3, 1, 2, 3, 2, 1)
@@ -48,9 +48,11 @@
 .const T_HOLD   = 120
 .const T_OUT    = 130
 
-.const TOP      = $32              // first visible raster line (shear loop)
-.const BOT      = $f8              // last+1 visible line
+.const TOP      = $3a              // shear band = the poetry rows only (1..19),
+.const BOT      = $d0              //   NOT the whole screen — keeps the budget
+.const WORKLINE = $d8              // irq_work fires below BOT (avoid same-line refire)
 .const D016BASE = $0c              // 40-col + xscroll 4 (shear centre)
+.const MODE_TIME = 220             // frames per shear mode (0 zigzag/1 wave/2 row)
 
 start:
         sei
@@ -102,9 +104,9 @@ start:
         lda #music.startSong-1
         jsr music.init
 
-        lda #<irq
+        lda #<irq_work
         sta $fffe
-        lda #>irq
+        lda #>irq_work
         sta $ffff
         lda #$7f
         sta $dc0d
@@ -113,7 +115,7 @@ start:
         lda $dd0d
         lda #$01
         sta $d01a
-        lda #$fb                   // fire in the lower border
+        lda #WORKLINE              // first IRQ = work, below the band
         sta $d012
         lda $d011
         and #$7f
@@ -127,7 +129,13 @@ start:
 //==================================================================
 // raster IRQ — off-screen work, then the visible-area $d016 shear loop.
 //==================================================================
-irq:
+//==================================================================
+// irq_work — fires at BOT (lower border). ALL per-frame work happens
+// here, out of the visible area, then hands the raster to irq_shear at
+// the band top. The $d020 band shows the work's raster cost; keep it
+// inside the border or the budget is blown.
+//==================================================================
+irq_work:
         pha
         txa
         pha
@@ -136,31 +144,62 @@ irq:
         lda #$ff
         sta $d019
 
-        inc $d020                  // ## budget band: off-screen work ##
+        inc $d020                  // ## budget band ##
         jsr music.play
         jsr update_phase
+        lda phase                  // skip the 400-char render while the
+        cmp #PH_HOLD               //   wall is held still (readable beat)
+        beq !norender+
         jsr render
+!norender:
         jsr build_shear
         dec $d020
 
-        // --- per-scanline $d016 zig-zag shear over the visible area ---
-        ldy #TOP
-!w0:    cpy $d012
-        bne !w0-
-!sl:    lda shear_tab,y
-        sta $d016
-        iny
-!w1:    cpy $d012
-        bne !w1-
-        cpy #BOT
-        bne !sl-
-        lda #D016BASE
-        sta $d016                  // restore centre for the border
+        lda #<irq_shear
+        sta $fffe
+        lda #>irq_shear
+        sta $ffff
+        lda #TOP
+        sta $d012
 
         pla
         tay
         pla
         tax
+        pla
+        rti
+
+//==================================================================
+// irq_shear — fires at TOP (band top). Just the per-scanline $d016
+// loop over the poetry band, nothing else. Hands back to irq_work.
+//==================================================================
+irq_shear:
+        pha
+        tya
+        pha
+        lda #$ff
+        sta $d019
+
+        ldy #TOP
+!sl:    lda shear_tab,y
+        sta $d016
+        iny
+!w:     cpy $d012
+        bne !w-
+        cpy #BOT
+        bne !sl-
+        lda #D016BASE
+        sta $d016
+
+        lda #<irq_work
+        sta $fffe
+        lda #>irq_work
+        sta $ffff
+        lda #WORKLINE
+        sta $d012
+
+        pla
+        tay
         pla
         rti
 
@@ -181,14 +220,38 @@ build_shear:
         lda sine_amp,x             // slow breath 0..3 while lines move
 !setamp:
         sta amp
+
+        // cycle the shear MODE every MODE_TIME frames
+        dec mode_timer
+        bne !disp+
+        lda #MODE_TIME
+        sta mode_timer
+        ldx mode
+        inx
+        cpx #3
+        bcc !ms+
+        ldx #0
+!ms:    stx mode
+!disp:
+        lda mode
+        bne !n0+
+        jmp build_zigzag
+!n0:    cmp #1
+        bne !n1+
+        jmp build_wave
+!n1:    jmp build_rowweave
+
+
+// mode 0 — per-scanline zig-zag: even +A / odd -A (the fine weave)
+build_zigzag:
         lda #D016BASE
         clc
         adc amp
-        sta ev                     // even lines: base + A
+        sta ev
         lda #D016BASE
         sec
         sbc amp
-        sta od                     // odd lines:  base - A
+        sta od
         ldx #TOP
 !fb:    lda ev
         sta shear_tab,x
@@ -198,6 +261,47 @@ build_shear:
         inx
         cpx #BOT
         bcc !fb-
+        rts
+
+// mode 1 — traveling sine wave flowing down the screen
+build_wave:
+        inc wave_scroll
+        ldx #TOP
+!wv:    txa
+        clc
+        adc wave_scroll
+        tay
+        lda wave_sine,y
+        sta shear_tab,x
+        inx
+        cpx #BOT
+        bcc !wv-
+        rts
+
+// mode 2 — per char-row weave: whole rows shift +A / -A, breathing
+build_rowweave:
+        lda #D016BASE
+        clc
+        adc amp
+        sta ev
+        lda #D016BASE
+        sec
+        sbc amp
+        sta od
+        ldx #TOP
+!rw:    txa
+        lsr
+        lsr
+        lsr
+        and #1
+        beq !rev+
+        lda od
+        jmp !rst+
+!rev:   lda ev
+!rst:   sta shear_tab,x
+        inx
+        cpx #BOT
+        bcc !rw-
         rts
 
 
@@ -301,6 +405,9 @@ amp:          .byte 0
 ev:           .byte 0
 od:           .byte 0
 tmp:          .byte 0
+mode:         .byte 0
+mode_timer:   .byte 1
+wave_scroll:  .byte 0
 sp:           .fill NLINES, 0
 
 line_start:   .fill NLINES, startList.get(i)
@@ -317,6 +424,10 @@ col_hi: .fill NLINES, >(COLOR + rowList.get(i)*40)
 
 // shear amplitude breath: 0..3, a few cycles over 256 frames
 sine_amp: .fill 256, round(1.5 + 1.5 * sin(toRadians(i * 360 / 256)))
+
+// traveling-wave table: actual $d016 values, base + a ±3 sine (4 cycles
+// down the screen). build_wave indexes it by (line + wave_scroll).
+wave_sine: .fill 256, D016BASE + round(3 * sin(toRadians(i * 360 * 4 / 256)))
 
 .align 256
 shear_tab: .fill 256, D016BASE
