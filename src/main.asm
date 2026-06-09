@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.27  "color_cycle compute-once+copy: 7 swim rows back at 50Hz"
+// splitter — v0.28  "row18 static (band-edge half-animate fix); 6 swim rows, 50Hz"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -54,9 +54,10 @@
 .const T_HOLD   = 120
 .const T_OUT    = 130
 
-.const TOP      = $42              // shear band spans the poetry (rows 2-18). Most
-.const BOT      = $c4              //   lines are static (drawn once, 0 work/frame);
-.const WORKLINE = $c8              //   only 3 hero lines animate -> budget wide open.
+.const TOP      = $42              // shear band over the poetry. Lowest SWIM row is now
+.const BOT      = $c4              //   row13 (raster ~161), well inside; row18 is static
+.const WORKLINE = $c8              //   (band edge + write-lag made it only half-animate,
+                                   //   and covering it fully pushed WORKLINE into overrun).
 .const D016BASE = $0c              // 38-col + xscroll 4 (shear centre)
 .const MODE_TIME = 220             // frames per shear mode (0 zigzag/1 wave/2 row)
 // --- Rubberband Swim (hero rows): a sine that travels through the 8
@@ -1099,7 +1100,7 @@ line_color:   .fill NLINES, colList.get(i)
 // per-line role: 0 static, 1 swim, 2 split(center-column, retired). The real
 // split is the venetian banner (row 16); 3 swim lines (rows 3/8/13) keep the
 // poem wall alive, staggered with static lines between for readability.
-role:         .byte R_SWIM, R_SWIM, 0, R_SWIM, R_SWIM, 0, R_SWIM, R_SWIM, 0, R_SWIM
+role:         .byte R_SWIM, R_SWIM, 0, R_SWIM, R_SWIM, 0, R_SWIM, R_SWIM, 0, 0
 // first raster line of each poetry row (display top 51 + row*8)
 line_scan:    .fill NLINES, 50 + rowList.get(i)*8   // 50 (not 51): the shear value
                                    // written during a line affects THAT line, so place
