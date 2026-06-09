@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.20  "kill swim speckle: $d016-first write order + badline-safe swim fill"
+// splitter — v0.21  "the real speckle: dark rainbow hues vanishing into bars -> bright palette"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -303,13 +303,18 @@ irq_shear:
         sta $d019
 
         ldy #TOP
-!sl:    lda shear_tab,y            // $d016 shear FIRST — it's the timing-critical one
-        sta $d016                  //   (must land before the ~cy16 char fetch or the
-        lda d021tab,y              //   swim row's left column glitches = the speckle).
-        sta $d021                  //   $d021 bg second (~cy15, still before the 38-col
-        iny                        //   display edge ~cy31) -> clean bars too.
-!w:     cpy $d012
-        bne !w-
+        // Wait for the line FIRST, then write $d016/$d021 immediately on the
+        // poll exit (cy ~4-11) — well before the ~cy14 fetch even with the
+        // poll's <=7cy jitter. Doing the BOT check AFTER the writes (not
+        // before) is what keeps the shear write early enough to stop the
+        // swim-row left-column speckle.
+!sl:    cpy $d012
+        bne !sl-
+        lda shear_tab,y
+        sta $d016
+        lda d021tab,y
+        sta $d021
+        iny
         cpy #BOT
         bne !sl-
         lda #D016BASE
@@ -345,8 +350,14 @@ build_shear:
         sta linecnt
 !bl:    ldx linecnt
         ldy line_scan,x            // Y = shear_tab base raster line for this row
-        lda role,x
-        bne !swim+
+        // Swim shear RETIRED: per-line $d016 + the cmp $d012 poll's <=7cy
+        // jitter speckled the swim rows against the bars (no stable raster).
+        // All rows now stay flat; those lines instead move via the rainbow
+        // colour drift (color_cycle still targets R_SWIM rows). The !swim
+        // code below is kept (dead) for an easy revert once a stable raster
+        // lands. To re-enable: uncomment the two lines below.
+        // lda role,x
+        // bne !swim+
         lda #D016BASE              // clean: 8 flat scanlines
         sta shear_tab,y
         iny
@@ -447,11 +458,12 @@ color_cycle:
         sta cptr+1
         ldy #39
 !cc:    tya
+        lsr                        // col>>1: one hue per 2 chars (de-confetti)
         clc
         adc frame
-        and #$0f
-        tax
-        lda rainbow16,x
+        and #$07                   // text-safe 8-hue palette (all high-luma) so no
+        tax                        //   char ever goes dark and vanishes into a bar
+        lda rbsafe,x
         sta (cptr),y
         dey
         bpl !cc-
