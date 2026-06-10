@@ -21,7 +21,7 @@
 .var music = LoadSid("../music/kleuter-dinges.sid")
 
 .var rowList   = List().add(2, 3, 4, 7, 8, 9, 12, 13, 14, 18)   // paragraphs w/ blank rows
-.var colList   = List().add($0e, $03, $0d, $07, $01, $0f, $0a, $05, $0c, $06)
+.var colList   = List().add($0e, $03, $0a, $04, $01, $0f, $03, $0a, $0e, $01)  // cool palette: static-row + split-hero (idx8) colours, ice/magenta tones
 .var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
 .var speedList = List().add(2, 3, 1, 2, 3, 1, 2, 3, 2, 1)
 
@@ -1415,7 +1415,12 @@ rainbow16:
         .byte $03, $0d, $05, $0c, $0f, $0b, $09, $00
 // text-safe rainbow (luma 12..32, no dark blue/brown/red) so the banner line
 // reads cleanly at the meet while still cycling all the bright hues
-rbsafe: .byte $08, $0a, $07, $0d, $01, $03, $0e, $04
+// ART-DIRECTED cool "ice -> magenta" gradient (drives the wall rainbow AND both
+// banners). Luminance-ordered per the Codebase64 VIC-II colour cheatsheet so it
+// reads as a smooth synthwave wave, and kept high-key (no dark blue/brown/grey)
+// so every letter stays legible on black. purple->pink->ltblue->cyan->ltgrey->
+// white and back (cyclic, no hard seam).
+rbsafe: .byte $04, $0a, $0e, $03, $0f, $01, $03, $0e
 // reunion-flash fade ramp, indexed by sflash (12=just met/white -> 1=dim).
 // white-hot cooling through yellow/orange/red to a dim grey, then split_update
 // snaps back to the row's own colour at sflash 0.
