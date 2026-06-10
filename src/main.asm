@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.38  "demand-driven banner arbiter: bottom scroller 16.7Hz klontjes -> 25-50Hz smooth"
+// splitter — v0.39  "the namesake wakes: row 14 SPLITS APART TO MEET AGAIN AS ONE"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -356,11 +356,16 @@ irq_work:
         jsr build_shear
         dbg($0e)                   // LT-BLUE = split state machine
         jsr split_update
-        // Rainbow runs EVERY frame now — it's round-robin (half the swim rows
-        // per frame, ~3k cy) so it fits even alongside the banner streaming,
-        // giving a consistent diagonal drift instead of fast-then-frozen.
+        // Rainbow is round-robin (cheap) and runs every frame... EXCEPT a frame
+        // where the split just redrew its row (render_split_x ~1k): we'd blow the
+        // ceiling, so we yield the rainbow that frame (its slow drift pauses 1
+        // frame -> invisible) to pay for the split. split_busy is set by
+        // render_split_x and cleared at the top of split_update.
         dbg($05)                   // GREEN = rainbow drift
+        lda split_busy
+        bne !nocyc+
         jsr color_cycle
+!nocyc:
         .if (BARS != 0) {
             lda b_did_render
             bne !light_done+
@@ -457,11 +462,12 @@ build_shear:
         // colour drift (color_cycle still targets R_SWIM rows). The !swim
         // code below is kept (dead) for an easy revert once a stable raster
         // lands. To re-enable: uncomment the two lines below.
-        lda role,x                 // swim re-enabled now the bars are off: the swim
-        bne !swim+                 //   speckle only showed against the bars; on the
-                                   //   black bg it's clean (write-order + badline fix).
+        lda role,x                 // only R_SWIM rows wobble; R_STATIC + R_SPLIT stay
+        cmp #R_SWIM                //   flat (the split row must NOT also $d016-swim or
+        beq !swim+                 //   the converging halves shear into mush).
         lda sxval,x                // static row: its live sub-pixel xscroll (= the
                                    //   smooth in/out slide); D016BASE when at HOLD
+                                   //   (R_SPLIT rows keep sxval at its D016BASE init)
         sta shear_tab,y
         iny
         sta shear_tab,y
@@ -661,8 +667,8 @@ slide_step:
         sec
         sbc gfine
         and #7
-        cmp #6
-        bcs !none+                 // soff 6/7 -> no row wraps this frame
+        cmp #5
+        bcs !none+                 // soff 5/6/7 -> no static row wraps this frame
         tay
         ldx soff2row,y             // X = row index to char-step + render
         clc
@@ -822,6 +828,8 @@ render:
 // step (cheap). MEET (sep=0) snaps a white colour flash + holds readable.
 //==================================================================
 split_update:
+        lda #0
+        sta split_busy             // set by render_split_x -> gates color_cycle
         lda #NLINES-1
         sta linecnt
 !su:    ldx linecnt
@@ -842,7 +850,12 @@ split_update:
         beq !step+
         jmp !next+
 
-!step:  lda ssub,x                 // timer hit 0 -> advance the state machine
+!step:  lda b_did_render           // a banner homed (heavy ~4.4k) this frame -> defer
+        beq !dostep+               //   the split step (render_split_x ~1k) one frame
+        inc stmr,x                 //   to stay under the off-screen ceiling. retry next.
+        jmp !next+
+!dostep:
+        lda ssub,x                 // timer hit 0 -> advance the state machine
         cmp #SP_CLOSE
         beq !close+
         cmp #SP_HOLD
@@ -905,6 +918,8 @@ split_update:
 // self-modded to the row's screen address. ~1000 cy, only on a step.
 //==================================================================
 render_split_x:
+        lda #1
+        sta split_busy             // heavy (~1k) this frame -> color_cycle yields
         ldx linecnt
         lda src_lo,x               // srcptr = buffer + CENTER (= text[0])
         clc
@@ -1311,8 +1326,8 @@ sdir:         .fill NLINES, (startList.get(i) < CENTER) ? 1 : 255  // slide dir/
 // per-row sub-pixel stagger so at most one row char-steps per frame. Tuned to
 // the fixed role map (static rows = idx 1,2,4,5,8,9 -> soff 0..5); soff2row is
 // the inverse. If role[] changes, regenerate both.
-soff:         .byte 0, 0, 1, 0, 2, 3, 0, 0, 4, 5
-soff2row:     .byte 1, 2, 4, 5, 8, 9
+soff:         .byte 0, 0, 1, 0, 2, 3, 0, 0, 0, 4   // idx8 now R_SPLIT -> out of the slide
+soff2row:     .byte 1, 2, 4, 5, 9                   // 5 static-slide rows (idx8 removed)
 frame:        .byte 0
 beatctr:      .byte 1                  // counts down to the next beat
 beathue:      .byte 0                  // rainbow hue surge accumulated on beats
@@ -1332,6 +1347,7 @@ sep:   .fill NLINES, 20                // separation: 20=apart/blank, 0=met
 ssub:  .fill NLINES, SP_GAP            // sub-phase, start apart
 stmr:  .fill NLINES, 1 + i*22          // staggered start so meets don't sync
 sflash:.fill NLINES, 0                 // white-flash countdown after a meet
+split_busy:   .byte 0                  // 1 = split redrew its row this frame (yield rainbow)
 
 // banner venetian split-scroll state (1px ROL/ROR streaming)
 bs_sub:       .byte 0                  // 0 = HOLD at meet, 1 = MOVE (streaming)
@@ -1377,7 +1393,9 @@ line_color:   .fill NLINES, colList.get(i)
 // per-line role: 0 static, 1 swim, 2 split(center-column, retired). The real
 // split is the venetian banner (row 16); 3 swim lines (rows 3/8/13) keep the
 // poem wall alive, staggered with static lines between for readability.
-role:         .byte R_SWIM, 0, 0, R_SWIM, 0, 0, R_SWIM, R_SWIM, 0, 0
+role:         .byte R_SWIM, 0, 0, R_SWIM, 0, 0, R_SWIM, R_SWIM, R_SPLIT, 0
+              // ^ idx8 (screen row 14) = "SPLIT APART TO MEET AGAIN AS ONE":
+              //   the namesake split/reunion, live on the row that announces it.
 // first raster line of each poetry row (display top 51 + row*8)
 line_scan:    .fill NLINES, 50 + rowList.get(i)*8   // 50 (not 51): the shear value
                                    // written during a line affects THAT line, so place
