@@ -20,7 +20,10 @@
 
 .var music = LoadSid("../music/kleuter-dinges.sid")
 
-.var rowList   = List().add(2, 3, 4, 7, 8, 9, 12, 13, 14, 18)   // paragraphs w/ blank rows
+.var rowList   = List().add(2, 3, 4, 7, 8, 9, 12, 13, 14, 17)   // last row was 18 =
+//   band-edge straddle (line_scan 194; band reads to 195) -> only its top pixel
+//   row sat inside the shear band and slid while the rest held = "leading top
+//   pixel row". Row 17 (line_scan 186, rows 186-193) sits FULLY inside the band.
 .var colList   = List().add($0e, $03, $0a, $04, $01, $0f, $03, $0a, $0e, $01)  // cool palette: static-row + split-hero (idx8) colours, ice/magenta tones
 .var startList = List().add(0, 80, 0, 80, 0, 80, 0, 80, 0, 80)
 .var speedList = List().add(2, 3, 1, 2, 3, 1, 2, 3, 2, 1)
