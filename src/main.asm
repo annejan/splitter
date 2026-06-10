@@ -1,5 +1,5 @@
 //==================================================================
-// splitter — v0.37  "static lines now 1px-SMOOTH in/out (per-row sub-pixel $d016)"
+// splitter — v0.38  "demand-driven banner arbiter: bottom scroller 16.7Hz klontjes -> 25-50Hz smooth"
 //
 // The splits are back — and over the WHOLE screen, cheaply. A stable
 // per-scanline $d016 loop shears every visible line: even lines xscroll
@@ -320,21 +320,29 @@ irq_work:
         sta b_did_render           //   the home blit below sets it so the slide
                                    //   render yields that one frame -> no overrun
         dbg($0a)                   // LT-RED = venetian banner (sets b_did_render)
-        // Stream only ONE banner per frame (50Hz). WEIGHTED 2:1 so the TOP
-        // banner (2) scrolls fast and the BOTTOM banner (1) scrolls slow:
-        // top gets 2 of every 3 frames, bottom 1.
-        inc b3ctr
-        lda b3ctr
-        cmp #3
-        bcc !c3+
-        lda #0
-        sta b3ctr
-!c3:    lda b3ctr
-        cmp #2
-        bcs !slow+
-        jsr banner_scroll2         // TOP (fast) — 2 of 3 frames
+        // DEMAND-DRIVEN dispatch: still at most ONE banner STREAMS per frame
+        // (a 2nd stream would overrun), but we no longer waste 2/3 of frames on
+        // an idle banner. Both banners get a FREE ~20cy HOLD tick (age/wake);
+        // then whichever is MOVING streams. If BOTH move we 1:1 alternate so the
+        // loser waits <=1 frame (25Hz, smooth) instead of starving. A holding
+        // banner costs nothing -> the sole mover scrolls up to 1px/frame = 50Hz
+        // (kills the bottom scroller's old 1px/3-frame "klontjes").
+        jsr banner_tick            // bottom: free HOLD age/wake
+        jsr banner_tick2           // top:    free HOLD age/wake
+        lda bs_sub
+        beq !trytop+               // bottom holding -> consider the top
+        lda bs_sub2
+        beq !dobtm+                // only bottom moving -> bottom streams (up to 50Hz)
+        lda movewho                // BOTH moving -> 1:1 alternate
+        eor #1
+        sta movewho
+        bne !dotop+                // movewho==1 -> top's turn this frame
+!dobtm: jsr banner_scroll          // bottom MOVE (a HOME inside still sets b_did_render)
         jmp !bcol+
-!slow:  jsr banner_scroll          // BOTTOM (slow) — 1 of 3 frames
+!trytop:
+        lda bs_sub2
+        beq !bcol+                 // neither moving -> stream nobody this frame
+!dotop: jsr banner_scroll2         // top MOVE
 !bcol:  jsr banner_color           // banner 1 colour every frame
         lda phase                  // during the static-row slide we spend this
         cmp #PH_HOLD               //   frame's headroom on render_next_static
@@ -1197,6 +1205,30 @@ build_bsrc2:
         rts
 
 //==================================================================
+// banner_tick / banner_tick2 — the cheap HOLD-only half of the banner state
+// machine (~20cy): a MOVING banner is left for the arbiter; a HOLDING one ages
+// its timer and, when it expires, flips to MOVE-ready (it streams from the next
+// dispatch). Mirrors the macro's HOLD/wake branch so calling tick every frame
+// for the idle banner is free -> the active banner gets every frame it can use.
+//==================================================================
+banner_tick:
+        lda bs_sub
+        bne !done+                 // already moving -> arbiter handles it
+        dec bs_tmr
+        bne !done+
+        lda #1                     // hold expired -> become move-ready
+        sta bs_sub
+!done:  rts
+banner_tick2:
+        lda bs_sub2
+        bne !done+
+        dec bs_tmr2
+        bne !done+
+        lda #1
+        sta bs_sub2
+!done:  rts
+
+//==================================================================
 // banner_scroll / banner_scroll2 — one 1px streaming frame each (macro).
 //==================================================================
 banner_scroll:
@@ -1308,7 +1340,7 @@ bcol:         .byte 0                  // bsrc column currently feeding in (0..M
 bsmooth:      .byte 0                  // 0..7 bit counter within a char-column
 pending_even: .fill 8, 0               // incoming column bytes for the even (ROL) rows
 pending_odd:  .fill 8, 0               // incoming column bytes for the odd (ROR) rows
-b3ctr:        .byte 0                  // 0..2 weighting counter (top:bottom = 2:1)
+movewho:      .byte 0                  // arbiter toggle: which banner streams when BOTH move
 bs_sub2:      .byte 0                  // banner 2 state (own canvas/message/tempo)
 bs_tmr2:      .byte 0
 bcol2:        .byte 0
