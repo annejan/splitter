@@ -114,7 +114,7 @@
 .const SPLIT_STEP  = 3             // frames per 1-col sep step (20 steps ~ 1.2s)
 .const SPLIT_HOLD  = 110           // readable hold at the meet (~2.2s)
 .const SPLIT_GAP   = 40            // blank pause when fully apart
-.const SPLIT_FLASH = 6             // white colour-RAM flash frames on the meet
+.const SPLIT_FLASH = 12            // reunion flash frames -> graceful white->gold fade
 
 // --- The venetian split-scroll BANNER (the kloten-intro effect, freshened):
 //     even pixel-rows ROL forward, odd pixel-rows ROR backward, fed from one
@@ -838,11 +838,16 @@ split_update:
         beq !live+
         jmp !next+
 !live:
-        lda sflash,x               // white-flash decay after a meet
+        lda sflash,x               // reunion flash -> graceful fade (white->gold->line)
         beq !noflash+
         dec sflash,x
-        bne !noflash+
-        lda line_color,x           // flash ended -> restore the line's colour
+        bne !fade+
+        lda line_color,x           // fade done -> restore the line's colour
+        jsr fill_col_x
+        ldx linecnt
+        jmp !noflash+
+!fade:  ldy sflash,x               // mid-fade: recolour the row to the ramp step
+        lda flashramp,y
         jsr fill_col_x
         ldx linecnt
 !noflash:
@@ -878,8 +883,12 @@ split_update:
         sta stmr,x
         lda #SPLIT_FLASH
         sta sflash,x
-        lda #$01                   // white reunion flash
+        lda #$01                   // white reunion flash (fades via flashramp)
         jsr fill_col_x
+        lda beathue                // reunion BLOOM: rotate the whole wall's rainbow
+        clc                        //   3/8 of the wheel (hue index is &7, so it must
+        adc #$03                   //   not be a multiple of 8) -> a colour pop that
+        sta beathue                //   radiates out as color_cycle round-robins
         jsr render_split_x
         jmp !next+
 
@@ -1407,6 +1416,10 @@ rainbow16:
 // text-safe rainbow (luma 12..32, no dark blue/brown/red) so the banner line
 // reads cleanly at the meet while still cycling all the bright hues
 rbsafe: .byte $08, $0a, $07, $0d, $01, $03, $0e, $04
+// reunion-flash fade ramp, indexed by sflash (12=just met/white -> 1=dim).
+// white-hot cooling through yellow/orange/red to a dim grey, then split_update
+// snaps back to the row's own colour at sflash 0.
+flashramp: .byte $0c, $0b, $09, $09, $02, $02, $08, $08, $07, $07, $01, $01, $01
 
 src_lo: .fill NLINES, <(LINEBUF + i*BUFW)
 src_hi: .fill NLINES, >(LINEBUF + i*BUFW)
